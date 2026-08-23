@@ -3,7 +3,6 @@ package com.kopandazavr.datamatrixscanner.scanner
 import android.graphics.Point
 import android.graphics.Bitmap
 import android.graphics.Matrix
-import android.graphics.Rect
 import android.util.Base64
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -15,7 +14,7 @@ import zxingcpp.BarcodeReader
 
 data class NormalizedPoint(val x: Float, val y: Float)
 
-enum class DetectionHighlight { ACTIVE, DUPLICATE }
+enum class DetectionHighlight { POTENTIAL, ACTIVE, DUPLICATE }
 
 data class DetectionBox(
     val points: List<NormalizedPoint>,
@@ -42,14 +41,14 @@ data class DecodedDataMatrix(
 )
 
 class DataMatrixAnalyzer(
-    private val onDecoded: (List<DecodedDataMatrix>) -> Unit
+    private val onDecoded: (List<DecodedDataMatrix>) -> Unit,
+    private val onPotentialBoxes: (List<DetectionBox>) -> Unit
 ) : ImageAnalysis.Analyzer, AutoCloseable {
     @Volatile var fullScreen: Boolean = false
-    @Volatile var visibleHeightFraction: Float = 1f
     @Volatile var enhancementMode: ScanEnhancementMode = ScanEnhancementMode.BALANCED
     private var lastAnalysisAt = 0L
     private var frameNumber = 0L
-    private val rescueProcessor = RescueDataMatrixProcessor(onDecoded)
+    private val rescueProcessor = RescueDataMatrixProcessor(onDecoded, onPotentialBoxes)
     private val targetedCaptureRequested = AtomicBoolean(false)
     private val pendingTargetedFrame = AtomicReference<Bitmap?>(null)
     private val capturedKeys = object : LinkedHashMap<String, Unit>(512, .75f, true) {
@@ -76,6 +75,7 @@ class DataMatrixAnalyzer(
             tryInvert = true,
             tryDownscale = true,
             tryDenoise = true,
+            returnErrors = true,
             maxNumberOfSymbols = 32,
             textMode = BarcodeReader.TextMode.PLAIN
         )
@@ -96,19 +96,39 @@ class DataMatrixAnalyzer(
         lastAnalysisAt = now
         try {
             val rotation = image.imageInfo.rotationDegrees
-            // The physical PreviewView always stays large. In compact mode Compose clips
-            // its centre, so apply the matching centre crop only to ImageAnalysis without
-            // asking CameraController to rebuild its use cases.
-            val crop = centeredVisibleCrop(image.cropRect, rotation, visibleHeightFraction)
-            image.setCropRect(crop)
+            val crop = image.cropRect
             val outputWidth = if (rotation == 90 || rotation == 270) crop.height() else crop.width()
             val outputHeight = if (rotation == 90 || rotation == 270) crop.width() else crop.height()
             frameNumber += 1
             val fastResults = fastReader.read(image)
             val hardEvery = 3L
-            val results = if (frameNumber % hardEvery == 0L && !rescueProcessor.isRunning) {
-                fastResults + hardReader.read(image)
-            } else fastResults
+            val ranHardPass = frameNumber % hardEvery == 0L && !rescueProcessor.isRunning
+            val hardResults = if (ranHardPass) hardReader.read(image) else emptyList()
+            val results = fastResults + hardResults
+            if (ranHardPass) {
+                val potentialRegions = mergeRecoveryRegions(
+                    hardResults
+                        .filter { it.error != null || it.bytes == null }
+                        .mapNotNull { result ->
+                            listOf(
+                                result.position.topLeft,
+                                result.position.topRight,
+                                result.position.bottomRight,
+                                result.position.bottomLeft
+                            ).toRecoveryRegion()
+                        },
+                    outputWidth,
+                    outputHeight,
+                    maxRegions = 12
+                )
+                if (potentialRegions.isNotEmpty()) {
+                    onPotentialBoxes(
+                        potentialRegions.mapIndexed { index, region ->
+                            region.toPotentialDetectionBox(outputWidth, outputHeight, "live:$index")
+                        }
+                    )
+                }
+            }
             val decoded = results.mapNotNull { result ->
                 val bytes = result.bytes ?: return@mapNotNull null
                 if (result.format != BarcodeReader.Format.DATA_MATRIX || result.error != null) return@mapNotNull null
@@ -179,20 +199,6 @@ class DataMatrixAnalyzer(
     }
 }
 
-private fun centeredVisibleCrop(source: Rect, rotation: Int, heightFraction: Float): Rect {
-    val fraction = heightFraction.coerceIn(0.1f, 1f)
-    if (fraction >= .999f) return Rect(source)
-    return if (rotation == 90 || rotation == 270) {
-        val targetWidth = (source.width() * fraction).toInt().coerceAtLeast(1)
-        val left = source.left + (source.width() - targetWidth) / 2
-        Rect(left, source.top, left + targetWidth, source.bottom)
-    } else {
-        val targetHeight = (source.height() * fraction).toInt().coerceAtLeast(1)
-        val top = source.top + (source.height() - targetHeight) / 2
-        Rect(source.left, top, source.right, top + targetHeight)
-    }
-}
-
 private fun captureVisibleBitmap(image: ImageProxy): Bitmap? = try {
     val full = image.toBitmap()
     val crop = image.cropRect
@@ -232,3 +238,14 @@ private fun Point.normalize(width: Int, height: Int) = NormalizedPoint(
     x = (x.toFloat() / width.coerceAtLeast(1)).coerceIn(0f, 1f),
     y = (y.toFloat() / height.coerceAtLeast(1)).coerceIn(0f, 1f)
 )
+
+private fun List<Point>.toRecoveryRegion(): RecoveryRegion? {
+    if (size < 4) return null
+    return RecoveryRegion(
+        left = minOf { it.x }.toFloat(),
+        top = minOf { it.y }.toFloat(),
+        right = maxOf { it.x }.toFloat(),
+        bottom = maxOf { it.y }.toFloat(),
+        corners = take(4).map { PixelPoint(it.x.toFloat(), it.y.toFloat()) }
+    )
+}

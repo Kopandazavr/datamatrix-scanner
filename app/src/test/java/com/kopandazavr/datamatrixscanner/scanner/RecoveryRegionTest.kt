@@ -38,4 +38,17 @@ class RecoveryRegionTest {
         assertEquals(4 + 9 + 16, tiles.size)
         assertTrue(tiles.all { it.left >= 0 && it.top >= 0 && it.right <= 1200 && it.bottom <= 900 })
     }
+
+    @Test
+    fun potentialRegionBecomesNormalizedWhiteOverlayBox() {
+        val box = RecoveryRegion(20f, 10f, 60f, 50f)
+            .toPotentialDetectionBox(100, 80, "test")
+
+        assertEquals(DetectionHighlight.POTENTIAL, box.highlight)
+        assertEquals(.2f, box.points[0].x, .001f)
+        assertEquals(.125f, box.points[0].y, .001f)
+        assertEquals(.6f, box.points[2].x, .001f)
+        assertEquals(.625f, box.points[2].y, .001f)
+        assertEquals(1.25f, box.imageAspect, .001f)
+    }
 }

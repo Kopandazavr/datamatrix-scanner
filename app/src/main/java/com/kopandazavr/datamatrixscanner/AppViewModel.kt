@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -39,6 +40,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
+    private val potentialFrames = MutableSharedFlow<List<DetectionBox>>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
     private val detectionCache = ConcurrentHashMap<String, DetectionHighlight>()
 
     private val _section = MutableStateFlow(RecordStatus.ACTIVE)
@@ -47,6 +52,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val records: StateFlow<List<CodeRecord>> = _records.asStateFlow()
     private val _setCount = MutableStateFlow(0)
     val setCount: StateFlow<Int> = _setCount.asStateFlow()
+    private val _confirmedBoxes = MutableStateFlow<List<DetectionBox>>(emptyList())
+    private val _potentialBoxes = MutableStateFlow<List<DetectionBox>>(emptyList())
     private val _boxes = MutableStateFlow<List<DetectionBox>>(emptyList())
     val boxes: StateFlow<List<DetectionBox>> = _boxes.asStateFlow()
     private val _matrixSize = MutableStateFlow(prefs.getInt("matrix_size", 1).coerceIn(0, 2))
@@ -71,6 +78,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             decodedFrames.collect(::processDecodedFrame)
         }
+        viewModelScope.launch {
+            potentialFrames.collectLatest { potential ->
+                _potentialBoxes.value = potential.map { it.copy(highlight = DetectionHighlight.POTENTIAL) }
+                publishBoxes()
+                delay(420)
+                _potentialBoxes.value = emptyList()
+                publishBoxes()
+            }
+        }
     }
 
     fun setSection(value: RecordStatus) {
@@ -80,6 +96,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onDecoded(items: List<DecodedDataMatrix>) {
         decodedFrames.tryEmit(items)
+    }
+
+    fun onPotentialBoxes(boxes: List<DetectionBox>) {
+        if (boxes.isNotEmpty()) potentialFrames.tryEmit(boxes)
     }
 
     private suspend fun processDecodedFrame(items: List<DecodedDataMatrix>) {
@@ -134,10 +154,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun showBoxes(newBoxes: List<DetectionBox>) {
         val generation = ++boxGeneration
-        _boxes.value = newBoxes
+        _confirmedBoxes.value = newBoxes
+        publishBoxes()
         viewModelScope.launch {
             delay(320)
-            if (generation == boxGeneration) _boxes.value = emptyList()
+            if (generation == boxGeneration) {
+                _confirmedBoxes.value = emptyList()
+                publishBoxes()
+            }
         }
     }
 
@@ -145,14 +169,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val generation = boxGeneration
         viewModelScope.launch {
             delay(180)
-            if (generation == boxGeneration) _boxes.value = emptyList()
+            if (generation == boxGeneration) {
+                _confirmedBoxes.value = emptyList()
+                publishBoxes()
+            }
         }
+    }
+
+    private fun publishBoxes() {
+        _boxes.value = _potentialBoxes.value + _confirmedBoxes.value
     }
 
     fun nextBatch() {
         _batchId.value += 1
         prefs.edit().putLong("batch_id", _batchId.value).apply()
         _setCount.value = 0
+        _confirmedBoxes.value = emptyList()
+        _potentialBoxes.value = emptyList()
         _boxes.value = emptyList()
     }
 

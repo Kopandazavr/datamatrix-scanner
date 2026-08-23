@@ -21,7 +21,8 @@ import zxingcpp.BarcodeReader
  * CameraX analyzer keeps consuming fresh frames.
  */
 internal class RescueDataMatrixProcessor(
-    private val onDecoded: (List<DecodedDataMatrix>) -> Unit
+    private val onDecoded: (List<DecodedDataMatrix>) -> Unit,
+    private val onPotentialBoxes: (List<DetectionBox>) -> Unit
 ) : AutoCloseable {
     private val running = AtomicBoolean(false)
     private val closed = AtomicBoolean(false)
@@ -64,6 +65,17 @@ internal class RescueDataMatrixProcessor(
                                 variant.bitmap.height,
                                 maxRegions = 12
                             )
+                            if (regions.isNotEmpty()) {
+                                onPotentialBoxes(
+                                    regions.mapIndexed { index, region ->
+                                        region.toPotentialDetectionBox(
+                                            variant.bitmap.width,
+                                            variant.bitmap.height,
+                                            "rescue:${spec.kind}:$index"
+                                        )
+                                    }
+                                )
+                            }
                             regions.forEach { region ->
                                 val padded = region.paddedSquare(variant.bitmap.width, variant.bitmap.height, .24f)
                                 val crop = cropBitmap(variant.bitmap, padded) ?: return@forEach

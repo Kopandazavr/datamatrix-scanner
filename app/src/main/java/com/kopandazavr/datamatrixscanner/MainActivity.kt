@@ -38,11 +38,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -53,7 +54,6 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.QrCode2
@@ -86,7 +86,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -111,6 +110,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -145,7 +145,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppMode { LIST, CAMERA, VIEWER, RECOVERY }
+private enum class AppMode { LIST, VIEWER, RECOVERY }
 private data class ViewerState(val ids: List<Long>, val index: Int, val source: RecordStatus)
 
 @Composable
@@ -161,9 +161,9 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     LaunchedEffect(Unit) { if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA) }
 
     var mode by remember { mutableStateOf(AppMode.LIST) }
+    var cameraFullscreen by remember { mutableStateOf(false) }
     var viewer by remember { mutableStateOf<ViewerState?>(null) }
-    var largePreview by rememberSaveable { mutableStateOf(true) }
-    val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded) }
+    val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded, vm::onPotentialBoxes) }
     val enhancementMode by vm.scanEnhancementMode.collectAsState()
     val executor = remember { Executors.newSingleThreadExecutor() }
     val controller = remember(permissionGranted) {
@@ -189,18 +189,17 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             executor.shutdown()
         }
     }
-    analyzer.fullScreen = mode == AppMode.CAMERA
-    analyzer.visibleHeightFraction = if (mode == AppMode.LIST && !largePreview) .5f else 1f
+    analyzer.fullScreen = mode == AppMode.LIST && cameraFullscreen
     analyzer.enhancementMode = enhancementMode
     LaunchedEffect(mode, controller) {
-        if (mode == AppMode.LIST || mode == AppMode.CAMERA) {
+        if (mode == AppMode.LIST) {
             controller?.setImageAnalysisAnalyzer(executor, analyzer)
         } else {
             controller?.clearImageAnalysisAnalyzer()
         }
     }
     LaunchedEffect(mode, controller) {
-        if ((mode == AppMode.LIST || mode == AppMode.CAMERA) && controller != null) {
+        if (mode == AppMode.LIST && controller != null) {
             // Give Preview/CameraX half a second to settle, then keep AF/AE/AWB
             // centred on the visible cross without toggling the torch or EV.
             delay(500)
@@ -224,24 +223,20 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             vm = vm,
             controller = controller,
             permissionGranted = permissionGranted,
-            largePreview = largePreview,
+            fullscreen = cameraFullscreen,
             enhancementMode = enhancementMode,
-            onTogglePreview = { largePreview = !largePreview },
-            onCamera = { mode = AppMode.CAMERA },
-            onRecovery = { mode = AppMode.RECOVERY },
+            onToggleFullscreen = { cameraFullscreen = !cameraFullscreen },
+            onRecovery = {
+                cameraFullscreen = false
+                mode = AppMode.RECOVERY
+            },
             onTargetedRescue = analyzer::requestTargetedRescue,
             onEnhancementMode = vm::setScanEnhancementMode,
             onOpenViewer = { id, ids, source ->
                 viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0), source)
+                cameraFullscreen = false
                 mode = AppMode.VIEWER
             }
-        )
-        AppMode.CAMERA -> FullCameraScreen(
-            vm = vm,
-            controller = controller,
-            permissionGranted = permissionGranted,
-            onTargetedRescue = analyzer::requestTargetedRescue,
-            onBack = { mode = AppMode.LIST }
         )
         AppMode.VIEWER -> ViewerScreen(
             vm = vm,
@@ -261,10 +256,9 @@ private fun ListScreen(
     vm: AppViewModel,
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
-    largePreview: Boolean,
+    fullscreen: Boolean,
     enhancementMode: ScanEnhancementMode,
-    onTogglePreview: () -> Unit,
-    onCamera: () -> Unit,
+    onToggleFullscreen: () -> Unit,
     onRecovery: () -> Unit,
     onTargetedRescue: () -> Unit,
     onEnhancementMode: (ScanEnhancementMode) -> Unit,
@@ -281,106 +275,124 @@ private fun ListScreen(
     var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
+    var topBarHeightPx by remember { mutableStateOf(0) }
+    val listState = rememberLazyListState()
 
     LaunchedEffect(section) { selection = RangeSelectionState() }
+    LaunchedEffect(section, records.firstOrNull()?.id, records.firstOrNull()?.lastScanAt) {
+        if (section == RecordStatus.ACTIVE && records.isNotEmpty()) listState.animateScrollToItem(0)
+    }
+    androidx.activity.compose.BackHandler(enabled = fullscreen, onBack = onToggleFullscreen)
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = { Text(section.title()) },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFF8FAFC)),
-                    actions = {
-                        RecordStatus.entries.forEach { item ->
-                            SectionButton(
-                                status = item,
-                                selected = section == item,
-                                onClick = { vm.setSection(item) }
+    Box(Modifier.fillMaxSize()) {
+        if (!fullscreen) {
+            Scaffold(
+                topBar = {
+                    Column {
+                        TopAppBar(
+                            modifier = Modifier.onSizeChanged { topBarHeightPx = it.height },
+                            title = { Text(section.title()) },
+                            colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFF8FAFC)),
+                            actions = {
+                                RecordStatus.entries.forEach { item ->
+                                    SectionButton(
+                                        status = item,
+                                        selected = section == item,
+                                        onClick = { vm.setSection(item) }
+                                    )
+                                }
+                                Box {
+                                    IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Меню") }
+                                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                        DropdownMenuItem(
+                                            text = { Text("Восстановить из фото") },
+                                            onClick = { menu = false; onRecovery() }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("Усиление: ${enhancementMode.title}") },
+                                            onClick = { menu = false; enhancementDialog = true }
+                                        )
+                                    }
+                                }
+                            }
+                        )
+                        Spacer(Modifier.height(348.dp))
+                    }
+                },
+                bottomBar = {
+                    if (selection.isActive) {
+                        val orderedIds = records.map(CodeRecord::id)
+                        SelectionBar(
+                            section = section,
+                            selected = selection.selected,
+                            allSelected = orderedIds.isNotEmpty() && orderedIds.all { it in selection.selected },
+                            onToggleAll = { selection = selection.toggleAll(orderedIds) },
+                            onMove = { target ->
+                                vm.move(selection.selected, target)
+                                selection = RangeSelectionState()
+                            }
+                        )
+                    }
+                }
+            ) { padding ->
+                if (records.isEmpty()) {
+                    Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                        Text(if (section == RecordStatus.ACTIVE) "Направьте камеру на Data Matrix" else "Здесь пока пусто", color = Color.Gray)
+                    }
+                } else {
+                    LazyColumn(Modifier.fillMaxSize().padding(padding), state = listState) {
+                        items(records, key = { it.id }) { record ->
+                            RecordRow(
+                                record = record,
+                                currentBatch = record.status == RecordStatus.ACTIVE && record.batchId == currentBatchId,
+                                selected = record.id in selection.selected,
+                                selectionMode = selection.isActive,
+                                onLongClick = {
+                                    selection = selection.selectRange(record.id, records.map(CodeRecord::id))
+                                },
+                                onClick = {
+                                    selection = selection.toggle(record.id, records.map(CodeRecord::id))
+                                },
+                                onMatrix = { onOpenViewer(record.id, records.map(CodeRecord::id), section) },
+                                onStatus = {
+                                    eventRecord = record
+                                    vm.events(record.id) { events = it }
+                                },
+                                onScanned = { vm.setScanned(record.id, it) }
                             )
                         }
-                        Box {
-                            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Меню") }
-                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Восстановить из фото") },
-                                    onClick = { menu = false; onRecovery() }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Усиление: ${enhancementMode.title}") },
-                                    onClick = { menu = false; enhancementDialog = true }
-                                )
-                            }
-                        }
                     }
-                )
-                CameraPreview(
-                    controller = controller,
-                    permissionGranted = permissionGranted,
-                    boxes = boxes,
-                    modifier = Modifier.fillMaxWidth().height(if (largePreview) 348.dp else 174.dp),
-                    sourceHeight = 348.dp,
-                    onClick = onTogglePreview,
-                    onFullscreen = onCamera,
-                    onPhoto = {
-                        val activeController = controller
-                        if (activeController == null) {
-                            Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
-                        } else {
-                            saveCameraPhoto(context, activeController) { result ->
-                                Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
-                            }
-                        }
-                    },
-                    onTargetedRescue = onTargetedRescue,
-                    recognizedCount = count,
-                    onNextBatch = vm::nextBatch
-                )
-            }
-        },
-        bottomBar = {
-            if (selection.isActive) {
-                val orderedIds = records.map(CodeRecord::id)
-                SelectionBar(
-                    section = section,
-                    selected = selection.selected,
-                    allSelected = orderedIds.isNotEmpty() && orderedIds.all { it in selection.selected },
-                    onToggleAll = { selection = selection.toggleAll(orderedIds) },
-                    onMove = { target ->
-                        vm.move(selection.selected, target)
-                        selection = RangeSelectionState()
-                    }
-                )
-            }
-        }
-    ) { padding ->
-        if (records.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text(if (section == RecordStatus.ACTIVE) "Направьте камеру на Data Matrix" else "Здесь пока пусто", color = Color.Gray)
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-                items(records, key = { it.id }) { record ->
-                    RecordRow(
-                        record = record,
-                        currentBatch = record.status == RecordStatus.ACTIVE && record.batchId == currentBatchId,
-                        selected = record.id in selection.selected,
-                        selectionMode = selection.isActive,
-                        onLongClick = {
-                            selection = selection.selectRange(record.id, records.map(CodeRecord::id))
-                        },
-                        onClick = {
-                            selection = selection.toggle(record.id, records.map(CodeRecord::id))
-                        },
-                        onMatrix = { onOpenViewer(record.id, records.map(CodeRecord::id), section) },
-                        onStatus = {
-                            eventRecord = record
-                            vm.events(record.id) { events = it }
-                        },
-                        onScanned = { vm.setScanned(record.id, it) }
-                    )
                 }
             }
         }
+
+        val cameraModifier = if (fullscreen) {
+            Modifier.fillMaxSize()
+        } else {
+            Modifier.fillMaxWidth().height(348.dp).offset { IntOffset(0, topBarHeightPx) }
+        }
+        CameraPreview(
+            controller = controller,
+            permissionGranted = permissionGranted,
+            boxes = boxes,
+            modifier = cameraModifier,
+            fullscreen = fullscreen,
+            onClick = onToggleFullscreen,
+            onBack = onToggleFullscreen,
+            onPhoto = {
+                val activeController = controller
+                if (activeController == null) {
+                    Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
+                } else {
+                    saveCameraPhoto(context, activeController) { result ->
+                        Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onTargetedRescue = onTargetedRescue,
+            recognizedCount = count,
+            onNextBatch = vm::nextBatch
+        )
     }
 
     eventRecord?.let { record ->
@@ -478,9 +490,9 @@ private fun CameraPreview(
     permissionGranted: Boolean,
     boxes: List<DetectionBox>,
     modifier: Modifier,
-    sourceHeight: androidx.compose.ui.unit.Dp? = null,
-    onClick: (() -> Unit)? = null,
-    onFullscreen: (() -> Unit)? = null,
+    fullscreen: Boolean,
+    onClick: () -> Unit,
+    onBack: () -> Unit,
     onPhoto: (() -> Unit)? = null,
     onTargetedRescue: (() -> Unit)? = null,
     recognizedCount: Int? = null,
@@ -488,11 +500,6 @@ private fun CameraPreview(
 ) {
     Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
-            val previewModifier = if (sourceHeight == null) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.fillMaxWidth().requiredHeight(sourceHeight)
-            }
             AndroidView(
                 factory = { ctx -> PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -500,13 +507,37 @@ private fun CameraPreview(
                     this.controller = controller
                 } },
                 update = { it.controller = controller },
-                modifier = previewModifier
+                modifier = Modifier.fillMaxSize()
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
         CameraAimOverlay()
-        if (onClick != null) Box(Modifier.fillMaxSize().clickable(onClick = onClick))
-        if (recognizedCount != null) {
+        Box(Modifier.fillMaxSize().clickable(onClick = onClick))
+        if (fullscreen) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 28.dp, start = 8.dp, end = 16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White) }
+                Text("Распознано: ${recognizedCount ?: 0}", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            }
+            onNextBatch?.let { action ->
+                Button(
+                    onClick = action,
+                    modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth().padding(16.dp).height(64.dp),
+                    shape = RoundedCornerShape(16.dp)
+                ) { Text("Следующий набор", fontSize = 20.sp) }
+            }
+            Row(
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                onTargetedRescue?.let { action ->
+                    FullscreenCameraButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр")
+                }
+                onPhoto?.let { action -> FullscreenCameraButton(action, Icons.Default.CameraAlt, "Сделать фото") }
+            }
+        } else if (recognizedCount != null) {
             Surface(
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
                 shape = RoundedCornerShape(9.dp),
@@ -521,7 +552,7 @@ private fun CameraPreview(
                 )
             }
         }
-        if (onNextBatch != null) {
+        if (!fullscreen && onNextBatch != null) {
             Surface(
                 onClick = onNextBatch,
                 modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).height(44.dp),
@@ -534,7 +565,7 @@ private fun CameraPreview(
                 }
             }
         }
-        if (onTargetedRescue != null || onPhoto != null || onFullscreen != null) {
+        if (!fullscreen && (onTargetedRescue != null || onPhoto != null)) {
             Row(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -543,7 +574,6 @@ private fun CameraPreview(
                     CameraOverlayButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр")
                 }
                 onPhoto?.let { action -> CameraOverlayButton(action, Icons.Default.CameraAlt, "Сделать фото") }
-                onFullscreen?.let { action -> CameraOverlayButton(action, Icons.Default.Fullscreen, "На весь экран") }
             }
         }
     }
@@ -593,10 +623,17 @@ private fun RecordRow(
             shape = RoundedCornerShape(12.dp),
             color = when {
                 selected -> Color(0xFFDDEAFE)
-                currentBatch -> Color(0xFFF0F8FF)
+                currentBatch -> Color(0xFFE0EEFF)
                 else -> Color.White
             },
-            border = BorderStroke(1.dp, if (selected) Color(0xFF93C5FD) else Color(0xFFD7DEE8))
+            border = BorderStroke(
+                1.dp,
+                when {
+                    selected -> Color(0xFF60A5FA)
+                    currentBatch -> Color(0xFF93C5FD)
+                    else -> Color(0xFFD7DEE8)
+                }
+            )
         ) {
             Row(
                 Modifier
@@ -739,66 +776,6 @@ private fun SelectionActionButton(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun FullCameraScreen(
-    vm: AppViewModel,
-    controller: LifecycleCameraController?,
-    permissionGranted: Boolean,
-    onTargetedRescue: () -> Unit,
-    onBack: () -> Unit
-) {
-    val count by vm.setCount.collectAsState()
-    val boxes by vm.boxes.collectAsState()
-    val context = LocalContext.current
-    androidx.activity.compose.BackHandler(onBack = onBack)
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
-        CameraPreview(
-            controller,
-            permissionGranted,
-            boxes,
-            Modifier.fillMaxSize()
-        )
-        Box(Modifier.fillMaxSize().clickable(onClick = onBack))
-        Row(
-            Modifier.fillMaxWidth().padding(top = 28.dp, start = 8.dp, end = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White) }
-            Text("Распознано: $count", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        }
-        Button(
-            onClick = vm::nextBatch,
-            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth().padding(16.dp).height(64.dp),
-            shape = RoundedCornerShape(16.dp)
-        ) { Text("Следующий набор", fontSize = 20.sp) }
-        Row(
-            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            FullscreenCameraButton(
-                onClick = onTargetedRescue,
-                icon = Icons.Default.CenterFocusStrong,
-                contentDescription = "Усилить точный кадр"
-            )
-            FullscreenCameraButton(
-                onClick = {
-                    val activeController = controller
-                    if (activeController == null) {
-                        Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
-                    } else {
-                        saveCameraPhoto(context, activeController) { result ->
-                            Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                },
-                icon = Icons.Default.CameraAlt,
-                contentDescription = "Сделать фото"
-            )
-        }
-    }
-}
-
 @Composable
 private fun FullscreenCameraButton(
     onClick: () -> Unit,
@@ -846,8 +823,12 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
                 if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             path.close()
-            val color = if (box.highlight == DetectionHighlight.DUPLICATE) Color(0xFFFACC15) else Color(0xFF22C55E)
-            drawPath(path, color, style = Stroke(width = 6f))
+            val (color, strokeWidth) = when (box.highlight) {
+                DetectionHighlight.POTENTIAL -> Color.White to 3.5f
+                DetectionHighlight.ACTIVE -> Color(0xFF22C55E) to 6f
+                DetectionHighlight.DUPLICATE -> Color(0xFFFACC15) to 6f
+            }
+            drawPath(path, color, style = Stroke(width = strokeWidth))
         }
     }
 }
@@ -1071,12 +1052,12 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
                 title = { Text("${displayedPage + 1} / ${viewerIds.size}") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
                 actions = {
+                    if (!showPhoto) IconButton(onClick = vm::cycleMatrixSize) { MatrixSizeIcon(matrixSize) }
                     if (scanFrame != null) {
                         IconButton(onClick = { showPhoto = !showPhoto }) {
                             Icon(if (showPhoto) Icons.Default.QrCode2 else Icons.Default.PhotoCamera, if (showPhoto) "Показать Data Matrix" else "Показать кадр")
                         }
                     }
-                    if (!showPhoto) IconButton(onClick = vm::cycleMatrixSize) { MatrixSizeIcon(matrixSize) }
                 }
             )
         },

@@ -92,6 +92,30 @@ internal fun overlappingTiles(
     }
 }
 
+internal fun RecoveryRegion.toPotentialDetectionBox(
+    imageWidth: Int,
+    imageHeight: Int,
+    keyPrefix: String
+): DetectionBox {
+    val boxCorners = corners.takeIf { it.size >= 4 } ?: listOf(
+        PixelPoint(left, top),
+        PixelPoint(right, top),
+        PixelPoint(right, bottom),
+        PixelPoint(left, bottom)
+    )
+    return DetectionBox(
+        points = boxCorners.take(4).map { point ->
+            NormalizedPoint(
+                x = (point.x / imageWidth.coerceAtLeast(1)).coerceIn(0f, 1f),
+                y = (point.y / imageHeight.coerceAtLeast(1)).coerceIn(0f, 1f)
+            )
+        },
+        key = "$keyPrefix:${left.toInt()}:${top.toInt()}:${right.toInt()}:${bottom.toInt()}",
+        imageAspect = imageWidth.toFloat() / imageHeight.coerceAtLeast(1),
+        highlight = DetectionHighlight.POTENTIAL
+    )
+}
+
 private fun intersectionOverUnion(first: RecoveryRegion, second: RecoveryRegion): Float {
     val intersectionWidth = (min(first.right, second.right) - max(first.left, second.left)).coerceAtLeast(0f)
     val intersectionHeight = (min(first.bottom, second.bottom) - max(first.top, second.top)).coerceAtLeast(0f)
