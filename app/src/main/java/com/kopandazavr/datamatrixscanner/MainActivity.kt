@@ -48,6 +48,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Fullscreen
@@ -55,6 +56,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
@@ -65,7 +67,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -119,7 +120,6 @@ import com.kopandazavr.datamatrixscanner.data.StoredScanFrame
 import com.kopandazavr.datamatrixscanner.scanner.DataMatrixAnalyzer
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
-import com.kopandazavr.datamatrixscanner.scanner.RescueProgress
 import com.kopandazavr.datamatrixscanner.scanner.ScanEnhancementMode
 import com.kopandazavr.datamatrixscanner.ui.DataMatrixImage
 import java.text.SimpleDateFormat
@@ -161,8 +161,6 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     var largePreview by rememberSaveable { mutableStateOf(true) }
     val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded) }
     val enhancementMode by vm.scanEnhancementMode.collectAsState()
-    val lastNovelScanAt by vm.lastNovelScanAt.collectAsState()
-    val rescueProgress by analyzer.rescueProgress.collectAsState()
     val executor = remember { Executors.newSingleThreadExecutor() }
     val controller = remember(permissionGranted) {
         if (!permissionGranted) null else LifecycleCameraController(context).apply {
@@ -190,7 +188,6 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     analyzer.fullScreen = mode == AppMode.CAMERA
     analyzer.visibleHeightFraction = if (mode == AppMode.LIST && !largePreview) .5f else 1f
     analyzer.enhancementMode = enhancementMode
-    analyzer.lastNovelScanAt = lastNovelScanAt
     LaunchedEffect(mode, controller) {
         if (mode == AppMode.LIST || mode == AppMode.CAMERA) {
             controller?.setImageAnalysisAnalyzer(executor, analyzer)
@@ -205,11 +202,11 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             controller = controller,
             permissionGranted = permissionGranted,
             largePreview = largePreview,
-            rescueProgress = rescueProgress,
             enhancementMode = enhancementMode,
             onTogglePreview = { largePreview = !largePreview },
             onCamera = { mode = AppMode.CAMERA },
             onRecovery = { mode = AppMode.RECOVERY },
+            onTargetedRescue = analyzer::requestTargetedRescue,
             onEnhancementMode = vm::setScanEnhancementMode,
             onOpenViewer = { id, ids, source ->
                 viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0), source)
@@ -220,7 +217,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             vm = vm,
             controller = controller,
             permissionGranted = permissionGranted,
-            rescueProgress = rescueProgress,
+            onTargetedRescue = analyzer::requestTargetedRescue,
             onBack = { mode = AppMode.LIST }
         )
         AppMode.VIEWER -> ViewerScreen(
@@ -242,11 +239,11 @@ private fun ListScreen(
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
     largePreview: Boolean,
-    rescueProgress: RescueProgress?,
     enhancementMode: ScanEnhancementMode,
     onTogglePreview: () -> Unit,
     onCamera: () -> Unit,
     onRecovery: () -> Unit,
+    onTargetedRescue: () -> Unit,
     onEnhancementMode: (ScanEnhancementMode) -> Unit,
     onOpenViewer: (Long, List<Long>, RecordStatus) -> Unit
 ) {
@@ -311,18 +308,25 @@ private fun ListScreen(
                             }
                         }
                     },
+                    onTargetedRescue = onTargetedRescue,
                     recognizedCount = count,
-                    onNextBatch = vm::nextBatch,
-                    rescueProgress = rescueProgress
+                    onNextBatch = vm::nextBatch
                 )
             }
         },
         bottomBar = {
             if (selection.isActive) {
-                SelectionBar(section, selection.selected, onMove = { target ->
-                    vm.move(selection.selected, target)
-                    selection = RangeSelectionState()
-                })
+                val orderedIds = records.map(CodeRecord::id)
+                SelectionBar(
+                    section = section,
+                    selected = selection.selected,
+                    allSelected = orderedIds.isNotEmpty() && orderedIds.all { it in selection.selected },
+                    onToggleAll = { selection = selection.toggleAll(orderedIds) },
+                    onMove = { target ->
+                        vm.move(selection.selected, target)
+                        selection = RangeSelectionState()
+                    }
+                )
             }
         }
     ) { padding ->
@@ -394,7 +398,7 @@ private fun EnhancementModeDialog(
         title = { Text("Усиление распознавания") },
         text = {
             Column {
-                Text("ZXing-C++ сканирует весь кадр, Google — код под центральным прицелом.")
+                Text("Оба движка сканируют весь видимый кадр. Кнопка с прицелом запускает максимальный проход для точно наведённого кадра.")
                 Spacer(Modifier.height(10.dp))
                 ScanEnhancementMode.entries.forEach { mode ->
                     Surface(
@@ -455,9 +459,9 @@ private fun CameraPreview(
     onClick: (() -> Unit)? = null,
     onFullscreen: (() -> Unit)? = null,
     onPhoto: (() -> Unit)? = null,
+    onTargetedRescue: (() -> Unit)? = null,
     recognizedCount: Int? = null,
-    onNextBatch: (() -> Unit)? = null,
-    rescueProgress: RescueProgress? = null
+    onNextBatch: (() -> Unit)? = null
 ) {
     Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
@@ -506,34 +510,14 @@ private fun CameraPreview(
                 }
             }
         }
-        rescueProgress?.let { progress ->
-            Surface(
-                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).width(158.dp),
-                shape = RoundedCornerShape(9.dp),
-                color = Color.Black.copy(alpha = .52f)
-            ) {
-                Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-                    Text(
-                        "Усиление ${progress.completed} / ${progress.total}",
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    LinearProgressIndicator(
-                        progress = { progress.fraction },
-                        modifier = Modifier.fillMaxWidth().height(3.dp),
-                        color = Color(0xFF60A5FA),
-                        trackColor = Color.White.copy(alpha = .25f)
-                    )
-                }
-            }
-        }
-        if (onPhoto != null || onFullscreen != null) {
+        if (onTargetedRescue != null || onPhoto != null || onFullscreen != null) {
             Row(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                onTargetedRescue?.let { action ->
+                    CameraOverlayButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр", circular = true)
+                }
                 onPhoto?.let { action -> CameraOverlayButton(action, Icons.Default.CameraAlt, "Сделать фото") }
                 onFullscreen?.let { action -> CameraOverlayButton(action, Icons.Default.Fullscreen, "На весь экран") }
             }
@@ -545,12 +529,14 @@ private fun CameraPreview(
 private fun CameraOverlayButton(
     onClick: () -> Unit,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String
+    contentDescription: String,
+    circular: Boolean = false
 ) {
     Surface(
         modifier = Modifier.size(44.dp),
-        shape = RoundedCornerShape(10.dp),
-        color = Color.Black.copy(alpha = 0.46f)
+        shape = if (circular) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(10.dp),
+        color = Color.Black.copy(alpha = 0.46f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = .56f))
     ) {
         IconButton(onClick = onClick) {
             Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(29.dp))
@@ -579,62 +565,65 @@ private fun RecordRow(
     }
 
     CompositionLocalProvider(LocalViewConfiguration provides halfSecondLongPress) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .height(128.dp)
-                .background(
-                    when {
-                        selected -> Color(0xFFDDEAFE)
-                        currentBatch -> Color(0xFFF0F8FF)
-                        else -> Color.White
-                    }
-                )
-                .combinedClickable(
-                    onClick = { if (selectionMode) onClick() },
-                    onLongClick = onLongClick
-                )
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp).height(128.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = when {
+                selected -> Color(0xFFDDEAFE)
+                currentBatch -> Color(0xFFF0F8FF)
+                else -> Color.White
+            },
+            border = BorderStroke(1.dp, if (selected) Color(0xFF93C5FD) else Color(0xFFD7DEE8))
         ) {
-            Column(
-                Modifier.combinedClickable(
-                    onClick = { if (selectionMode) onClick() else onMatrix() },
-                    onLongClick = onLongClick
-                ),
-                horizontalAlignment = Alignment.CenterHorizontally
+            Row(
+                Modifier
+                    .fillMaxSize()
+                    .combinedClickable(
+                        onClick = { if (selectionMode) onClick() },
+                        onLongClick = onLongClick
+                    )
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                DataMatrixImage(record.rawBytes, record.isGs1, 80.dp)
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    "№${record.id}",
-                    color = Color(0xFF64748B),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-                Text(record.displayText, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                Text(formatTime(record.lastScanAt), fontSize = 13.sp, color = Color.DarkGray)
-                StatusTag(
-                    duplicate = record.isDuplicate,
-                    duplicateCount = record.duplicateCount,
-                    onClick = { if (selectionMode) onClick() else onStatus() }
-                )
-            }
-            Button(
-                onClick = { if (selectionMode) onClick() else onScanned(true) },
-                enabled = selectionMode || record.status != RecordStatus.ARCHIVED,
-                modifier = Modifier.width(72.dp).fillMaxHeight(),
-                shape = RoundedCornerShape(14.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-            ) {
-                Icon(
-                    if (selectionMode && selected) Icons.Default.Check else Icons.Default.Archive,
-                    if (selectionMode) "Выбрать" else "В архив",
-                    modifier = Modifier.size(38.dp)
-                )
+                Column(
+                    Modifier.combinedClickable(
+                        onClick = { if (selectionMode) onClick() else onMatrix() },
+                        onLongClick = onLongClick
+                    ),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    DataMatrixImage(record.rawBytes, record.isGs1, 80.dp)
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        "№${record.id}",
+                        color = Color(0xFF64748B),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                    Text(record.displayText, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(formatTime(record.lastScanAt), fontSize = 13.sp, color = Color.DarkGray)
+                    StatusTag(
+                        duplicate = record.isDuplicate,
+                        duplicateCount = record.duplicateCount,
+                        onClick = { if (selectionMode) onClick() else onStatus() }
+                    )
+                }
+                Button(
+                    onClick = { if (selectionMode) onClick() else onScanned(true) },
+                    enabled = selectionMode || record.status != RecordStatus.ARCHIVED,
+                    modifier = Modifier.width(72.dp).fillMaxHeight(),
+                    shape = RoundedCornerShape(14.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                ) {
+                    Icon(
+                        if (selectionMode && selected) Icons.Default.Check else Icons.Default.Archive,
+                        if (selectionMode) "Выбрать" else "В архив",
+                        modifier = Modifier.size(38.dp)
+                    )
+                }
             }
         }
     }
@@ -669,22 +658,60 @@ private fun StatusTag(duplicate: Boolean, duplicateCount: Int? = null, onClick: 
 }
 
 @Composable
-private fun SelectionBar(section: RecordStatus, selected: Set<Long>, onMove: (RecordStatus) -> Unit) {
+private fun SelectionBar(
+    section: RecordStatus,
+    selected: Set<Long>,
+    allSelected: Boolean,
+    onToggleAll: () -> Unit,
+    onMove: (RecordStatus) -> Unit
+) {
     BottomAppBar(containerColor = Color(0xFFEFF6FF)) {
         Text("Выбрано: ${selected.size}", Modifier.padding(horizontal = 12.dp).weight(1f), fontWeight = FontWeight.Bold)
+        SelectionActionButton(
+            icon = Icons.Default.SelectAll,
+            contentDescription = if (allSelected) "Снять выделение со всех" else "Выбрать всё",
+            selected = allSelected,
+            onClick = onToggleAll
+        )
         when (section) {
             RecordStatus.ACTIVE -> {
-                TextButton(onClick = { onMove(RecordStatus.ARCHIVED) }) { Icon(Icons.Default.Archive, null); Text("В архив") }
-                TextButton(onClick = { onMove(RecordStatus.TRASH) }) { Icon(Icons.Default.Delete, null); Text("Удалить") }
+                SelectionActionButton(Icons.Default.Archive, "В архив") { onMove(RecordStatus.ARCHIVED) }
+                SelectionActionButton(Icons.Default.Delete, "Удалить") { onMove(RecordStatus.TRASH) }
             }
             RecordStatus.ARCHIVED -> {
-                TextButton(onClick = { onMove(RecordStatus.ACTIVE) }) { Icon(Icons.Default.Restore, null); Text("Вернуть") }
-                TextButton(onClick = { onMove(RecordStatus.TRASH) }) { Icon(Icons.Default.Delete, null); Text("В корзину") }
+                SelectionActionButton(Icons.Default.Restore, "Вернуть") { onMove(RecordStatus.ACTIVE) }
+                SelectionActionButton(Icons.Default.Delete, "В корзину") { onMove(RecordStatus.TRASH) }
             }
             RecordStatus.TRASH -> {
-                TextButton(onClick = { onMove(RecordStatus.ACTIVE) }) { Icon(Icons.Default.Restore, null); Text("Вернуть") }
-                TextButton(onClick = { onMove(RecordStatus.ARCHIVED) }) { Icon(Icons.Default.Archive, null); Text("В архив") }
+                SelectionActionButton(Icons.Default.Restore, "Вернуть") { onMove(RecordStatus.ACTIVE) }
+                SelectionActionButton(Icons.Default.Archive, "В архив") { onMove(RecordStatus.ARCHIVED) }
             }
+        }
+        Spacer(Modifier.width(8.dp))
+    }
+}
+
+@Composable
+private fun SelectionActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    selected: Boolean = false,
+    onClick: () -> Unit
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.padding(horizontal = 3.dp).size(48.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) Color(0xFFDDEAFE) else Color.White,
+        border = BorderStroke(1.dp, if (selected) Color(0xFF60A5FA) else Color(0xFF94A3B8))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                icon,
+                contentDescription,
+                tint = if (selected) Color(0xFF1D4ED8) else Color(0xFF334155),
+                modifier = Modifier.size(28.dp)
+            )
         }
     }
 }
@@ -695,7 +722,7 @@ private fun FullCameraScreen(
     vm: AppViewModel,
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
-    rescueProgress: RescueProgress?,
+    onTargetedRescue: () -> Unit,
     onBack: () -> Unit
 ) {
     val count by vm.setCount.collectAsState()
@@ -707,8 +734,7 @@ private fun FullCameraScreen(
             controller,
             permissionGranted,
             boxes,
-            Modifier.fillMaxSize(),
-            rescueProgress = rescueProgress
+            Modifier.fillMaxSize()
         )
         Box(Modifier.fillMaxSize().clickable(onClick = onBack))
         Row(
@@ -723,12 +749,16 @@ private fun FullCameraScreen(
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth().padding(16.dp).height(64.dp),
             shape = RoundedCornerShape(16.dp)
         ) { Text("Следующий набор", fontSize = 20.sp) }
-        Surface(
-            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp).size(62.dp),
-            shape = androidx.compose.foundation.shape.CircleShape,
-            color = Color.Black.copy(alpha = 0.42f)
+        Row(
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            IconButton(
+            FullscreenCameraButton(
+                onClick = onTargetedRescue,
+                icon = Icons.Default.CenterFocusStrong,
+                contentDescription = "Усилить точный кадр"
+            )
+            FullscreenCameraButton(
                 onClick = {
                     val activeController = controller
                     if (activeController == null) {
@@ -738,8 +768,29 @@ private fun FullCameraScreen(
                             Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
                         }
                     }
-                }
-            ) { Icon(Icons.Default.CameraAlt, "Сделать фото", tint = Color.White, modifier = Modifier.size(34.dp)) }
+                },
+                icon = Icons.Default.CameraAlt,
+                contentDescription = "Сделать фото"
+            )
+        }
+    }
+}
+
+@Composable
+private fun FullscreenCameraButton(
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String
+) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(62.dp),
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = Color.Black.copy(alpha = 0.42f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = .62f))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(34.dp))
         }
     }
 }
@@ -783,19 +834,11 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
 private fun CameraAimOverlay() {
     Canvas(Modifier.fillMaxSize()) {
         val center = Offset(size.width / 2f, size.height / 2f)
-        val radius = 23.dp.toPx()
-        val arm = 13.dp.toPx()
-        val gap = 6.dp.toPx()
-        fun cross(color: Color, width: Float) {
-            drawLine(color, Offset(center.x - radius - arm, center.y), Offset(center.x - gap, center.y), width, StrokeCap.Round)
-            drawLine(color, Offset(center.x + gap, center.y), Offset(center.x + radius + arm, center.y), width, StrokeCap.Round)
-            drawLine(color, Offset(center.x, center.y - radius - arm), Offset(center.x, center.y - gap), width, StrokeCap.Round)
-            drawLine(color, Offset(center.x, center.y + gap), Offset(center.x, center.y + radius + arm), width, StrokeCap.Round)
-            drawCircle(color, radius, center, style = Stroke(width))
-        }
-        cross(Color.Black.copy(alpha = .62f), 5.dp.toPx())
-        cross(Color.White.copy(alpha = .92f), 2.dp.toPx())
-        drawCircle(Color.White, 2.5.dp.toPx(), center)
+        val arm = 14.dp.toPx()
+        drawLine(Color.Black.copy(alpha = .5f), Offset(center.x - arm, center.y), Offset(center.x + arm, center.y), 3.dp.toPx(), StrokeCap.Round)
+        drawLine(Color.Black.copy(alpha = .5f), Offset(center.x, center.y - arm), Offset(center.x, center.y + arm), 3.dp.toPx(), StrokeCap.Round)
+        drawLine(Color.White, Offset(center.x - arm, center.y), Offset(center.x + arm, center.y), 1.dp.toPx(), StrokeCap.Round)
+        drawLine(Color.White, Offset(center.x, center.y - arm), Offset(center.x, center.y + arm), 1.dp.toPx(), StrokeCap.Round)
     }
 }
 

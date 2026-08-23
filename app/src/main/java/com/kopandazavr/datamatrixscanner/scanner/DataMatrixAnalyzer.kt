@@ -9,7 +9,8 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
-import kotlinx.coroutines.flow.StateFlow
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import zxingcpp.BarcodeReader
 
 data class NormalizedPoint(val x: Float, val y: Float)
@@ -46,12 +47,11 @@ class DataMatrixAnalyzer(
     @Volatile var fullScreen: Boolean = false
     @Volatile var visibleHeightFraction: Float = 1f
     @Volatile var enhancementMode: ScanEnhancementMode = ScanEnhancementMode.BALANCED
-    @Volatile var lastNovelScanAt: Long = System.currentTimeMillis()
     private var lastAnalysisAt = 0L
-    private var lastRescueStartedAt = 0L
     private var frameNumber = 0L
     private val rescueProcessor = RescueDataMatrixProcessor(onDecoded)
-    val rescueProgress: StateFlow<RescueProgress?> = rescueProcessor.progress
+    private val targetedCaptureRequested = AtomicBoolean(false)
+    private val pendingTargetedFrame = AtomicReference<Bitmap?>(null)
     private val capturedKeys = object : LinkedHashMap<String, Unit>(512, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?): Boolean = size > 512
     }
@@ -80,6 +80,11 @@ class DataMatrixAnalyzer(
             textMode = BarcodeReader.TextMode.PLAIN
         )
     )
+
+    /** The next analyzed frame is preserved and receives the strongest rescue profile. */
+    fun requestTargetedRescue() {
+        targetedCaptureRequested.set(true)
+    }
 
     override fun analyze(image: ImageProxy) {
         val now = System.currentTimeMillis()
@@ -141,14 +146,24 @@ class DataMatrixAnalyzer(
                     } else item
                 })
             }
-            val mode = enhancementMode
-            if (RescueScanPolicy.shouldStart(now, lastNovelScanAt, lastRescueStartedAt, rescueProcessor.isRunning, mode)) {
+
+            if (targetedCaptureRequested.compareAndSet(true, false)) {
                 captureVisibleBitmap(image)?.let { snapshot ->
-                    if (rescueProcessor.start(snapshot, mode)) {
-                        lastRescueStartedAt = now
-                    } else {
-                        snapshot.recycle()
-                    }
+                    pendingTargetedFrame.getAndSet(snapshot)?.recycle()
+                }
+            }
+
+            val targeted = pendingTargetedFrame.get()
+            if (!rescueProcessor.isRunning && targeted != null && pendingTargetedFrame.compareAndSet(targeted, null)) {
+                if (!rescueProcessor.start(targeted, ScanEnhancementMode.AGGRESSIVE)) {
+                    targeted.recycle()
+                }
+            }
+
+            val mode = enhancementMode
+            if (pendingTargetedFrame.get() == null && RescueScanPolicy.shouldStart(rescueProcessor.isRunning, mode)) {
+                captureVisibleBitmap(image)?.let { snapshot ->
+                    if (!rescueProcessor.start(snapshot, mode)) snapshot.recycle()
                 }
             }
         } catch (_: Throwable) {
@@ -159,6 +174,7 @@ class DataMatrixAnalyzer(
     }
 
     override fun close() {
+        pendingTargetedFrame.getAndSet(null)?.recycle()
         rescueProcessor.close()
     }
 }

@@ -61,9 +61,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         ScanEnhancementMode.fromPreference(prefs.getString("scan_enhancement_mode", null))
     )
     val scanEnhancementMode: StateFlow<ScanEnhancementMode> = _scanEnhancementMode.asStateFlow()
-    private val _lastNovelScanAt = MutableStateFlow(System.currentTimeMillis())
-    val lastNovelScanAt: StateFlow<Long> = _lastNovelScanAt.asStateFlow()
-
     private val _batchId = MutableStateFlow(prefs.getLong("batch_id", 1L))
     val batchId: StateFlow<Long> = _batchId.asStateFlow()
     private var boxGeneration = 0L
@@ -128,7 +125,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 visibleBoxes += item.box.copy(highlight = highlight)
             }
             if (changed) {
-                _lastNovelScanAt.value = System.currentTimeMillis()
                 if (activatedRecord) _section.value = RecordStatus.ACTIVE
                 refreshRecordsAndCount()
             }
@@ -158,13 +154,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putLong("batch_id", _batchId.value).apply()
         _setCount.value = 0
         _boxes.value = emptyList()
-        _lastNovelScanAt.value = System.currentTimeMillis()
     }
 
     fun setScanEnhancementMode(mode: ScanEnhancementMode) {
         _scanEnhancementMode.value = mode
         prefs.edit().putString("scan_enhancement_mode", mode.name).apply()
-        _lastNovelScanAt.value = System.currentTimeMillis()
     }
 
     fun setScanned(id: Long, scanned: Boolean, after: (() -> Unit)? = null) {

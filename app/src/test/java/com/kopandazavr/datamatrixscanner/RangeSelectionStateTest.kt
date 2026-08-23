@@ -57,4 +57,17 @@ class RangeSelectionStateTest {
         assertEquals(setOf(4L, 5L, 6L, 7L), state.selected)
         assertEquals(4L, state.anchorId)
     }
+
+    @Test
+    fun selectAllCompletesPartialSelectionAndSecondTapClearsIt() {
+        val partial = RangeSelectionState(setOf(2L, 4L), anchorId = 4L)
+        val all = partial.toggleAll(rows)
+
+        assertEquals(rows.toSet(), all.selected)
+        assertEquals(10L, all.anchorId)
+
+        val cleared = all.toggleAll(rows)
+        assertFalse(cleared.isActive)
+        assertEquals(null, cleared.anchorId)
+    }
 }

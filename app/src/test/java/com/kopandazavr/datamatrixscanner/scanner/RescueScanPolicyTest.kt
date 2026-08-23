@@ -13,12 +13,11 @@ class RescueScanPolicyTest {
     }
 
     @Test
-    fun `rescue waits for stagnation and never overlaps`() {
-        val now = 10_000L
-        assertFalse(RescueScanPolicy.shouldStart(now, 9_700L, 0L, false, ScanEnhancementMode.BALANCED))
-        assertFalse(RescueScanPolicy.shouldStart(now, 9_000L, 9_700L, false, ScanEnhancementMode.BALANCED))
-        assertFalse(RescueScanPolicy.shouldStart(now, 9_000L, 0L, true, ScanEnhancementMode.BALANCED))
-        assertTrue(RescueScanPolicy.shouldStart(now, 9_000L, 0L, false, ScanEnhancementMode.BALANCED))
+    fun `rescue restarts immediately when workers are free and never overlaps`() {
+        assertFalse(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.OFF))
+        assertFalse(RescueScanPolicy.shouldStart(true, ScanEnhancementMode.BALANCED))
+        assertTrue(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.BALANCED))
+        assertTrue(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.AGGRESSIVE))
     }
 
     @Test

@@ -13,10 +13,6 @@ import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import zxingcpp.BarcodeReader
 
 /**
@@ -36,20 +32,14 @@ internal class RescueDataMatrixProcessor(
             .setBarcodeFormats(Barcode.FORMAT_DATA_MATRIX)
             .build()
     )
-    private val _progress = MutableStateFlow<RescueProgress?>(null)
-    val progress: StateFlow<RescueProgress?> = _progress.asStateFlow()
-
     val isRunning: Boolean get() = running.get()
 
     /** Takes ownership of [source] only when true is returned. */
     fun start(source: Bitmap, mode: ScanEnhancementMode): Boolean {
         if (closed.get() || mode == ScanEnhancementMode.OFF || !running.compareAndSet(false, true)) return false
         val specs = ImageVariantFactory.specs(mode)
-        val total = specs.size * 2
-        val completed = AtomicInteger(0)
-        _progress.value = RescueProgress(0, total)
         coordinator.execute {
-            val seen = HashSet<String>()
+            val accumulated = LinkedHashMap<String, DecodedDataMatrix>()
             val capturedFrame = source.toCapturedFrame()
             try {
                 specs.forEach { spec ->
@@ -57,24 +47,22 @@ internal class RescueDataMatrixProcessor(
                     val variant = ImageVariantFactory.create(source, spec.kind)
                     try {
                         val zxingFuture = workers.submit<List<DecodedDataMatrix>> {
-                            try {
-                                decodeWithZxing(variant.bitmap, spec.binarizer, capturedFrame)
-                            } finally {
-                                publishProgress(completed.incrementAndGet(), total)
-                            }
+                            decodeWithZxing(variant.bitmap, spec.binarizer, capturedFrame)
                         }
                         val googleFuture = workers.submit<List<DecodedDataMatrix>> {
-                            try {
-                                decodeWithGoogle(variant.bitmap, capturedFrame)
-                            } finally {
-                                publishProgress(completed.incrementAndGet(), total)
-                            }
+                            decodeWithGoogle(variant.bitmap, capturedFrame)
                         }
                         val decoded = buildList {
                             runCatching { zxingFuture.get() }.getOrNull()?.let(::addAll)
                             runCatching { googleFuture.get() }.getOrNull()?.let(::addAll)
-                        }.filter { seen.add(Base64.encodeToString(it.rawBytes, Base64.NO_WRAP)) }
-                        if (decoded.isNotEmpty()) onDecoded(decoded)
+                        }
+                        decoded.forEach { item ->
+                            accumulated.putIfAbsent(Base64.encodeToString(item.rawBytes, Base64.NO_WRAP), item)
+                        }
+                        // Publish the cumulative result. If the ViewModel drops an older
+                        // callback under load, the latest callback still contains every
+                        // symbol found earlier in this rescue batch.
+                        if (decoded.isNotEmpty()) onDecoded(accumulated.values.toList())
                     } finally {
                         if (variant.owned) variant.bitmap.recycle()
                     }
@@ -84,14 +72,9 @@ internal class RescueDataMatrixProcessor(
             } finally {
                 source.recycle()
                 running.set(false)
-                _progress.value = null
             }
         }
         return true
-    }
-
-    private fun publishProgress(completed: Int, total: Int) {
-        _progress.value = RescueProgress(completed.coerceAtMost(total), total)
     }
 
     private fun decodeWithZxing(
@@ -174,7 +157,6 @@ internal class RescueDataMatrixProcessor(
         scanner.close()
         coordinator.shutdownNow()
         workers.shutdownNow()
-        _progress.value = null
     }
 }
 

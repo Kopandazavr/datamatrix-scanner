@@ -2,12 +2,11 @@ package com.kopandazavr.datamatrixscanner.scanner
 
 enum class ScanEnhancementMode(
     val title: String,
-    val variantCount: Int,
-    val cooldownMs: Long
+    val variantCount: Int
 ) {
-    OFF("Выключено", 0, Long.MAX_VALUE),
-    BALANCED("Сбалансированное", 6, 600L),
-    AGGRESSIVE("Усиленное", 10, 800L);
+    OFF("Выключено", 0),
+    BALANCED("Сбалансированное", 6),
+    AGGRESSIVE("Усиленное", 10);
 
     val decoderAttemptCount: Int get() = variantCount * 2
 
@@ -17,26 +16,9 @@ enum class ScanEnhancementMode(
     }
 }
 
-data class RescueProgress(
-    val completed: Int,
-    val total: Int
-) {
-    val fraction: Float get() = if (total == 0) 0f else completed.toFloat() / total
-}
-
 internal object RescueScanPolicy {
-    const val STAGNATION_MS = 450L
-
-    fun shouldStart(
-        now: Long,
-        lastNovelScanAt: Long,
-        lastStartedAt: Long,
-        running: Boolean,
-        mode: ScanEnhancementMode
-    ): Boolean = mode != ScanEnhancementMode.OFF &&
-        !running &&
-        now - lastNovelScanAt >= STAGNATION_MS &&
-        now - lastStartedAt >= mode.cooldownMs
+    fun shouldStart(running: Boolean, mode: ScanEnhancementMode): Boolean =
+        mode != ScanEnhancementMode.OFF && !running
 }
 
 internal fun looksLikeGs1(rawBytes: ByteArray): Boolean {

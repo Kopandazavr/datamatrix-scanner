@@ -7,6 +7,17 @@ internal data class RangeSelectionState(
 ) {
     val isActive: Boolean get() = selected.isNotEmpty()
 
+    /** Select every visible row, or clear the selection when all rows are selected. */
+    fun toggleAll(orderedIds: List<Long>): RangeSelectionState {
+        if (orderedIds.isEmpty()) return RangeSelectionState()
+        val visibleIds = orderedIds.toSet()
+        return if (visibleIds.all { it in selected }) {
+            RangeSelectionState()
+        } else {
+            RangeSelectionState(visibleIds, orderedIds.last())
+        }
+    }
+
     /**
      * A short tap toggles one row. Selecting it makes it the next range anchor.
      * Deselecting a non-anchor keeps the current boundary. If the anchor itself
