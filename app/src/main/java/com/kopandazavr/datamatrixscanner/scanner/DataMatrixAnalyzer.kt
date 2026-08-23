@@ -3,6 +3,7 @@ package com.kopandazavr.datamatrixscanner.scanner
 import android.graphics.Point
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.util.Base64
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -42,6 +43,7 @@ class DataMatrixAnalyzer(
     private val onDecoded: (List<DecodedDataMatrix>) -> Unit
 ) : ImageAnalysis.Analyzer {
     @Volatile var fullScreen: Boolean = false
+    @Volatile var visibleHeightFraction: Float = 1f
     private var lastAnalysisAt = 0L
     private var frameNumber = 0L
     private val capturedKeys = object : LinkedHashMap<String, Unit>(512, .75f, true) {
@@ -82,11 +84,12 @@ class DataMatrixAnalyzer(
         }
         lastAnalysisAt = now
         try {
-            // BarcodeReader honours ImageProxy.cropRect. CameraController keeps that crop
-            // aligned with PreviewView's FILL_CENTER viewport, so decoding and overlay use
-            // exactly the part of the sensor frame visible to the user.
-            val crop = image.cropRect
             val rotation = image.imageInfo.rotationDegrees
+            // The physical PreviewView always stays large. In compact mode Compose clips
+            // its centre, so apply the matching centre crop only to ImageAnalysis without
+            // asking CameraController to rebuild its use cases.
+            val crop = centeredVisibleCrop(image.cropRect, rotation, visibleHeightFraction)
+            image.setCropRect(crop)
             val outputWidth = if (rotation == 90 || rotation == 270) crop.height() else crop.width()
             val outputHeight = if (rotation == 90 || rotation == 270) crop.width() else crop.height()
             frameNumber += 1
@@ -135,6 +138,20 @@ class DataMatrixAnalyzer(
         } finally {
             image.close()
         }
+    }
+}
+
+private fun centeredVisibleCrop(source: Rect, rotation: Int, heightFraction: Float): Rect {
+    val fraction = heightFraction.coerceIn(0.1f, 1f)
+    if (fraction >= .999f) return Rect(source)
+    return if (rotation == 90 || rotation == 270) {
+        val targetWidth = (source.width() * fraction).toInt().coerceAtLeast(1)
+        val left = source.left + (source.width() - targetWidth) / 2
+        Rect(left, source.top, left + targetWidth, source.bottom)
+    } else {
+        val targetHeight = (source.height() * fraction).toInt().coerceAtLeast(1)
+        val top = source.top + (source.height() - targetHeight) / 2
+        Rect(source.left, top, source.right, top + targetHeight)
     }
 }
 

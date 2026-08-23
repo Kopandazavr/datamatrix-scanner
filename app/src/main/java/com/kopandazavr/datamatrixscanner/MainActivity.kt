@@ -34,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -146,6 +147,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
 
     var mode by remember { mutableStateOf(AppMode.LIST) }
     var viewer by remember { mutableStateOf<ViewerState?>(null) }
+    var largePreview by rememberSaveable { mutableStateOf(true) }
     val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val controller = remember(permissionGranted) {
@@ -167,6 +169,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
     analyzer.fullScreen = mode == AppMode.CAMERA
+    analyzer.visibleHeightFraction = if (mode == AppMode.LIST && !largePreview) .5f else 1f
     LaunchedEffect(mode, controller) {
         if (mode == AppMode.LIST || mode == AppMode.CAMERA) {
             controller?.setImageAnalysisAnalyzer(executor, analyzer)
@@ -180,6 +183,8 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             vm = vm,
             controller = controller,
             permissionGranted = permissionGranted,
+            largePreview = largePreview,
+            onTogglePreview = { largePreview = !largePreview },
             onCamera = { mode = AppMode.CAMERA },
             onRecovery = { mode = AppMode.RECOVERY },
             onOpenViewer = { id, ids ->
@@ -211,6 +216,8 @@ private fun ListScreen(
     vm: AppViewModel,
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
+    largePreview: Boolean,
+    onTogglePreview: () -> Unit,
     onCamera: () -> Unit,
     onRecovery: () -> Unit,
     onOpenViewer: (Long, List<Long>) -> Unit
@@ -220,7 +227,6 @@ private fun ListScreen(
     val boxes by vm.boxes.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
-    var largePreview by rememberSaveable { mutableStateOf(true) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
 
@@ -255,7 +261,8 @@ private fun ListScreen(
                     permissionGranted = permissionGranted,
                     boxes = boxes,
                     modifier = Modifier.fillMaxWidth().height(if (largePreview) 348.dp else 174.dp),
-                    onClick = { largePreview = !largePreview },
+                    sourceHeight = 348.dp,
+                    onClick = onTogglePreview,
                     onFullscreen = onCamera
                 )
             }
@@ -320,11 +327,17 @@ private fun CameraPreview(
     permissionGranted: Boolean,
     boxes: List<DetectionBox>,
     modifier: Modifier,
+    sourceHeight: androidx.compose.ui.unit.Dp? = null,
     onClick: (() -> Unit)? = null,
     onFullscreen: (() -> Unit)? = null
 ) {
     Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
+            val previewModifier = if (sourceHeight == null) {
+                Modifier.fillMaxSize()
+            } else {
+                Modifier.fillMaxWidth().requiredHeight(sourceHeight)
+            }
             AndroidView(
                 factory = { ctx -> PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -332,7 +345,7 @@ private fun CameraPreview(
                     this.controller = controller
                 } },
                 update = { it.controller = controller },
-                modifier = Modifier.fillMaxSize()
+                modifier = previewModifier
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
