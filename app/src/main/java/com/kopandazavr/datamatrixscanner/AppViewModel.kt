@@ -86,6 +86,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         scanMutex.withLock {
             val visibleBoxes = mutableListOf<DetectionBox>()
             var changed = false
+            var activatedRecord = false
             items.forEach { item ->
                 val cacheKey = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)
                 val highlight = detectionCache[cacheKey] ?: run {
@@ -102,10 +103,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val resolved = when (outcome) {
                         is ScanOutcome.New -> {
                             changed = true
+                            activatedRecord = true
                             DetectionHighlight.ACTIVE
                         }
                         is ScanOutcome.Restored -> {
                             changed = true
+                            activatedRecord = true
                             if (outcome.from == RecordStatus.ARCHIVED) DetectionHighlight.DUPLICATE else DetectionHighlight.ACTIVE
                         }
                         is ScanOutcome.IgnoredActive -> {
@@ -117,7 +120,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 visibleBoxes += item.box.copy(highlight = highlight)
             }
-            if (changed) refreshRecordsAndCount()
+            if (changed) {
+                if (activatedRecord) _section.value = RecordStatus.ACTIVE
+                refreshRecordsAndCount()
+            }
             showBoxes(visibleBoxes)
         }
     }
