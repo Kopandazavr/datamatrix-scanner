@@ -215,6 +215,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) { callback(repository.get(id)) }
     }
 
+    fun records(ids: List<Long>, callback: (Map<Long, CodeRecord>) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            callback(ids.mapNotNull { id -> repository.get(id)?.let { id to it } }.toMap())
+        }
+    }
+
     fun scanFrame(id: Long, callback: (StoredScanFrame?) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) { callback(repository.scanFrame(id)) }
     }

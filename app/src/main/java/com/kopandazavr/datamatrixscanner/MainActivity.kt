@@ -22,7 +22,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -38,6 +38,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -53,7 +55,6 @@ import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -74,9 +75,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -113,7 +114,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import kotlin.math.abs
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -363,13 +364,13 @@ private fun RecordRow(
     onScanned: (Boolean) -> Unit
 ) {
     val platformConfiguration = LocalViewConfiguration.current
-    val oneSecondLongPress = remember(platformConfiguration) {
+    val halfSecondLongPress = remember(platformConfiguration) {
         object : ViewConfiguration by platformConfiguration {
             override val longPressTimeoutMillis: Long = 500L
         }
     }
 
-    CompositionLocalProvider(LocalViewConfiguration provides oneSecondLongPress) {
+    CompositionLocalProvider(LocalViewConfiguration provides halfSecondLongPress) {
         Row(
             Modifier
                 .fillMaxWidth()
@@ -401,12 +402,18 @@ private fun RecordRow(
                     Text(if (record.isDuplicate) "Дубликат ×${record.duplicateCount}" else "Уникальный", fontSize = 13.sp)
                 }
             }
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Checkbox(
-                    checked = if (selectionMode) selected else record.status == RecordStatus.ARCHIVED,
-                    onCheckedChange = { if (selectionMode) onClick() else onScanned(it) }
+            Button(
+                onClick = { if (selectionMode) onClick() else onScanned(true) },
+                enabled = selectionMode || record.status != RecordStatus.ARCHIVED,
+                modifier = Modifier.width(72.dp).fillMaxHeight(),
+                shape = RoundedCornerShape(14.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+            ) {
+                Icon(
+                    if (selectionMode && selected) Icons.Default.Check else Icons.Default.Archive,
+                    if (selectionMode) "Выбрать" else "В архив",
+                    modifier = Modifier.size(38.dp)
                 )
-                Text(if (record.status == RecordStatus.ARCHIVED) "В архиве" else "В архив", fontSize = 10.sp)
             }
         }
     }
@@ -653,31 +660,32 @@ private fun RecoveryCandidateRow(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> Unit) {
-    var index by remember { mutableStateOf(initial.index.coerceIn(0, initial.ids.lastIndex.coerceAtLeast(0))) }
-    var record by remember { mutableStateOf<CodeRecord?>(null) }
+    val initialPage = initial.index.coerceIn(0, initial.ids.lastIndex.coerceAtLeast(0))
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { initial.ids.size })
+    val scope = rememberCoroutineScope()
+    var records by remember { mutableStateOf<Map<Long, CodeRecord>>(emptyMap()) }
     var scanFrame by remember { mutableStateOf<StoredScanFrame?>(null) }
     var showPhoto by remember { mutableStateOf(false) }
     val matrixSize by vm.matrixSize.collectAsState()
-    var drag by remember { mutableFloatStateOf(0f) }
-    val id = initial.ids.getOrNull(index)
-    LaunchedEffect(id) {
-        record = null
+    val currentId = initial.ids.getOrNull(pagerState.currentPage)
+    val current = currentId?.let(records::get)
+
+    LaunchedEffect(initial.ids) { vm.records(initial.ids) { records = it } }
+    LaunchedEffect(currentId) {
         scanFrame = null
         showPhoto = false
-        id?.let {
-            vm.record(it) { value -> record = value }
-            vm.scanFrame(it) { value -> scanFrame = value }
-        }
+        currentId?.let { vm.scanFrame(it) { value -> scanFrame = value } }
     }
     androidx.activity.compose.BackHandler(onBack = onBack)
 
-    fun previous() { if (index > 0) index -= 1 }
-    fun next() { if (index < initial.ids.lastIndex) index += 1 }
+    fun animateTo(page: Int) {
+        if (page in initial.ids.indices) scope.launch { pagerState.animateScrollToPage(page) }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("${index + 1} / ${initial.ids.size}") },
+                title = { Text("${pagerState.currentPage + 1} / ${initial.ids.size}") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
                 actions = {
                     if (scanFrame != null) {
@@ -685,16 +693,19 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
                             Icon(if (showPhoto) Icons.Default.QrCode2 else Icons.Default.PhotoCamera, if (showPhoto) "Показать Data Matrix" else "Показать кадр")
                         }
                     }
-                    IconButton(onClick = vm::cycleMatrixSize) { MatrixSizeIcon(matrixSize) }
+                    if (!showPhoto) IconButton(onClick = vm::cycleMatrixSize) { MatrixSizeIcon(matrixSize) }
                 }
             )
         },
         bottomBar = {
             Button(
                 onClick = {
-                    record?.let { current ->
-                        if (!current.isScanned) vm.setScanned(current.id, true) { }
-                        next()
+                    current?.let { record ->
+                        if (!record.isScanned) {
+                            vm.setScanned(record.id, true) { }
+                            records = records + (record.id to record.copy(isScanned = true, status = RecordStatus.ARCHIVED))
+                        }
+                        animateTo(pagerState.currentPage + 1)
                     }
                 },
                 modifier = Modifier.navigationBarsPadding().fillMaxWidth().padding(16.dp).height(72.dp),
@@ -702,45 +713,57 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
             ) { Text("ОТСКАНИРОВАНО", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
         }
     ) { padding ->
-        val current = record
-        Column(
-            Modifier.fillMaxSize().padding(padding),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            if (current == null) Text("Загрузка…") else {
-                val frame = scanFrame
-                if (showPhoto && frame != null) {
-                    StoredFrameImage(frame, Modifier.fillMaxWidth().weight(1f).padding(12.dp))
-                } else {
-                    val size = listOf(190.dp, 270.dp, 340.dp)[matrixSize]
-                    Box(
-                        Modifier
-                            .size(size)
-                            .pointerInput(index) {
-                                detectHorizontalDragGestures(
-                                    onDragStart = { drag = 0f },
-                                    onHorizontalDrag = { _, amount -> drag += amount },
-                                    onDragEnd = {
-                                        if (abs(drag) > 60f) if (drag < 0) next() else previous()
-                                        drag = 0f
-                                    }
-                                )
-                            }
-                    ) {
-                        DataMatrixImage(current.rawBytes, current.isGs1, size)
-                        Row(Modifier.fillMaxSize()) {
-                            Box(Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = { previous() }, onLongClick = {}))
-                            Box(Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = { next() }, onLongClick = {}))
-                        }
-                    }
-                }
-                Spacer(Modifier.height(24.dp))
-                Text(if (current.isDuplicate) "Дубликат" else "Уникальный", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                Text(if (current.isScanned) "Отсканировано" else "Не отсканировано", fontSize = 17.sp)
-                Text(current.displayText, Modifier.padding(16.dp), maxLines = 3, overflow = TextOverflow.Ellipsis)
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxSize().padding(padding),
+            beyondViewportPageCount = 1,
+            pageSpacing = 8.dp
+        ) { page ->
+            val pageRecord = initial.ids.getOrNull(page)?.let(records::get)
+            if (pageRecord == null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Загрузка…") }
+            } else {
+                ViewerCard(
+                    record = pageRecord,
+                    frame = scanFrame.takeIf { page == pagerState.currentPage },
+                    showPhoto = showPhoto && page == pagerState.currentPage,
+                    matrixSize = matrixSize,
+                    onPrevious = { animateTo(page - 1) },
+                    onNext = { animateTo(page + 1) }
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun ViewerCard(
+    record: CodeRecord,
+    frame: StoredScanFrame?,
+    showPhoto: Boolean,
+    matrixSize: Int,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(record.id) {
+                detectTapGestures { offset -> if (offset.x < size.width / 2f) onPrevious() else onNext() }
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        if (showPhoto && frame != null) {
+            StoredFrameImage(frame, Modifier.fillMaxWidth().weight(1f).padding(12.dp))
+        } else {
+            val size = listOf(95.dp, 190.dp, 340.dp)[matrixSize]
+            DataMatrixImage(record.rawBytes, record.isGs1, size)
+        }
+        Spacer(Modifier.height(24.dp))
+        Text(if (record.isDuplicate) "Дубликат" else "Уникальный", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+        Text(if (record.isScanned) "Отсканировано" else "Не отсканировано", fontSize = 17.sp)
+        Text(record.displayText, Modifier.padding(16.dp), maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
 }
 
