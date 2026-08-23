@@ -225,6 +225,7 @@ private fun ListScreen(
     val section by vm.section.collectAsState()
     val records by vm.records.collectAsState()
     val boxes by vm.boxes.collectAsState()
+    val currentBatchId by vm.batchId.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
@@ -285,6 +286,7 @@ private fun ListScreen(
                 items(records, key = { it.id }) { record ->
                     RecordRow(
                         record = record,
+                        currentBatch = record.status == RecordStatus.ACTIVE && record.batchId == currentBatchId,
                         selected = record.id in selection.selected,
                         selectionMode = selection.isActive,
                         onLongClick = {
@@ -352,7 +354,7 @@ private fun CameraPreview(
         if (onClick != null) Box(Modifier.fillMaxSize().clickable(onClick = onClick))
         if (onFullscreen != null) {
             Surface(
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(44.dp),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(44.dp),
                 shape = RoundedCornerShape(10.dp),
                 color = Color.Black.copy(alpha = 0.46f)
             ) {
@@ -368,6 +370,7 @@ private fun CameraPreview(
 @Composable
 private fun RecordRow(
     record: CodeRecord,
+    currentBatch: Boolean,
     selected: Boolean,
     selectionMode: Boolean,
     onLongClick: () -> Unit,
@@ -388,7 +391,13 @@ private fun RecordRow(
             Modifier
                 .fillMaxWidth()
                 .height(112.dp)
-                .background(if (selected) Color(0xFFDDEAFE) else Color.White)
+                .background(
+                    when {
+                        selected -> Color(0xFFDDEAFE)
+                        currentBatch -> Color(0xFFF0F8FF)
+                        else -> Color.White
+                    }
+                )
                 .combinedClickable(
                     onClick = { if (selectionMode) onClick() },
                     onLongClick = onLongClick

@@ -153,6 +153,7 @@ class CodeRepository(context: Context) {
             val values = ContentValues().apply {
                 put("status", RecordStatus.ACTIVE.name)
                 put("last_scan_at", now)
+                put("batch_id", batchId)
                 put("is_scanned", 0)
                 put("is_duplicate", if (wasArchived) 1 else 0)
                 put("duplicate_count", existing.duplicateCount + if (wasArchived) 1 else 0)
@@ -178,6 +179,12 @@ class CodeRepository(context: Context) {
     fun list(status: RecordStatus): List<CodeRecord> = helper.readableDatabase.query(
         "codes", null, "status=?", arrayOf(status.name), null, null, "last_scan_at DESC, id DESC"
     ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.toRecord()) } }
+
+    @Synchronized
+    fun activeCount(batchId: Long): Int = helper.readableDatabase.rawQuery(
+        "SELECT COUNT(*) FROM codes WHERE status=? AND batch_id=?",
+        arrayOf(RecordStatus.ACTIVE.name, batchId.toString())
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
 
     @Synchronized
     fun get(id: Long): CodeRecord? = getById(helper.readableDatabase, id)

@@ -57,7 +57,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _recoveryMessage = MutableStateFlow<String?>(null)
     val recoveryMessage: StateFlow<String?> = _recoveryMessage.asStateFlow()
 
-    private var batchId = prefs.getLong("batch_id", 1L)
+    private val _batchId = MutableStateFlow(prefs.getLong("batch_id", 1L))
+    val batchId: StateFlow<Long> = _batchId.asStateFlow()
     private var boxGeneration = 0L
 
     init {
@@ -94,13 +95,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         symbologyIdentifier = item.symbologyIdentifier,
                         contentType = item.contentType,
                         fallbackText = item.text,
-                        batchId = batchId,
+                        batchId = _batchId.value,
                         capturedFrame = item.capturedFrame,
                         detectionBox = item.box
                     )
                     val resolved = when (outcome) {
                         is ScanOutcome.New -> {
-                            _setCount.value += 1
                             changed = true
                             DetectionHighlight.ACTIVE
                         }
@@ -117,7 +117,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 visibleBoxes += item.box.copy(highlight = highlight)
             }
-            if (changed) _records.value = repository.list(_section.value)
+            if (changed) refreshRecordsAndCount()
             showBoxes(visibleBoxes)
         }
     }
@@ -140,8 +140,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun nextBatch() {
-        batchId += 1
-        prefs.edit().putLong("batch_id", batchId).apply()
+        _batchId.value += 1
+        prefs.edit().putLong("batch_id", _batchId.value).apply()
         _setCount.value = 0
         _boxes.value = emptyList()
     }
@@ -150,7 +150,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.setScanned(id, scanned)
             detectionCache.clear()
-            _records.value = repository.list(_section.value)
+            refreshRecordsAndCount()
             after?.invoke()
         }
     }
@@ -159,7 +159,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.move(ids, target)
             detectionCache.clear()
-            _records.value = repository.list(_section.value)
+            refreshRecordsAndCount()
         }
     }
 
@@ -187,10 +187,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun acceptRecovery(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
-            repository.acceptRecoveryCandidate(id, batchId)
+            repository.acceptRecoveryCandidate(id, _batchId.value)
             detectionCache.clear()
             _recoveryCandidates.value = repository.recoveryCandidates()
-            _records.value = repository.list(_section.value)
+            refreshRecordsAndCount()
         }
     }
 
@@ -232,6 +232,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refresh() {
-        viewModelScope.launch(Dispatchers.IO) { _records.value = repository.list(_section.value) }
+        viewModelScope.launch(Dispatchers.IO) { refreshRecordsAndCount() }
+    }
+
+    private fun refreshRecordsAndCount() {
+        _records.value = repository.list(_section.value)
+        _setCount.value = repository.activeCount(_batchId.value)
     }
 }
