@@ -20,7 +20,7 @@ Android-приложение для пакетного сканирования 
 
 ## Скачать APK
 
-Откройте раздел **Releases**, затем релиз **Data Matrix Scanner — latest debug** и скачайте `app-debug.apk` из блока Assets. Android может попросить разрешить установку из браузера.
+[Скачать свежий debug APK](https://github.com/Kopandazavr/datamatrix-scanner/releases/download/latest-debug/app-debug.apk) прямо на телефон. Если ссылка ещё не появилась, дождитесь завершения GitHub Actions. Android может попросить разрешить установку из браузера.
 
 ## Важное ограничение GS1
 
