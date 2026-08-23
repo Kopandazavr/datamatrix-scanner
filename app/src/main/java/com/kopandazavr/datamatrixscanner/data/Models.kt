@@ -30,7 +30,18 @@ data class CodeRecord(
     val isDuplicate: Boolean,
     val duplicateCount: Int,
     val isScanned: Boolean,
-    val batchId: Long
+    val batchId: Long,
+    val scanFrameId: Long?
+)
+
+data class FramePoint(val x: Float, val y: Float)
+
+data class StoredScanFrame(
+    val id: Long,
+    val jpeg: ByteArray,
+    val width: Int,
+    val height: Int,
+    val box: List<FramePoint>
 )
 
 data class ScanEvent(

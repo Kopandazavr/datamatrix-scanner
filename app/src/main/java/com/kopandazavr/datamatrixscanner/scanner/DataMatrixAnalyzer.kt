@@ -1,8 +1,13 @@
 package com.kopandazavr.datamatrixscanner.scanner
 
 import android.graphics.Point
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.util.Base64
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import java.io.ByteArrayOutputStream
+import java.security.MessageDigest
 import zxingcpp.BarcodeReader
 
 data class NormalizedPoint(val x: Float, val y: Float)
@@ -16,13 +21,21 @@ data class DetectionBox(
     val highlight: DetectionHighlight = DetectionHighlight.ACTIVE
 )
 
+data class CapturedFrame(
+    val jpeg: ByteArray,
+    val width: Int,
+    val height: Int,
+    val sha256: String
+)
+
 data class DecodedDataMatrix(
     val rawBytes: ByteArray,
     val text: String?,
     val isGs1: Boolean,
     val symbologyIdentifier: String?,
     val contentType: String,
-    val box: DetectionBox
+    val box: DetectionBox,
+    val capturedFrame: CapturedFrame? = null
 )
 
 class DataMatrixAnalyzer(
@@ -31,15 +44,18 @@ class DataMatrixAnalyzer(
     @Volatile var fullScreen: Boolean = false
     private var lastAnalysisAt = 0L
     private var frameNumber = 0L
+    private val capturedKeys = object : LinkedHashMap<String, Unit>(512, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?): Boolean = size > 512
+    }
 
     private val fastReader = BarcodeReader(
         BarcodeReader.Options(
             formats = setOf(BarcodeReader.Format.DATA_MATRIX),
             tryHarder = false,
-            tryRotate = true,
+            tryRotate = false,
             tryInvert = false,
-            tryDownscale = true,
-            maxNumberOfSymbols = 32,
+            tryDownscale = false,
+            maxNumberOfSymbols = 16,
             textMode = BarcodeReader.TextMode.PLAIN
         )
     )
@@ -59,7 +75,7 @@ class DataMatrixAnalyzer(
 
     override fun analyze(image: ImageProxy) {
         val now = System.currentTimeMillis()
-        val interval = if (fullScreen) 40L else 75L
+        val interval = if (fullScreen) 25L else 50L
         if (now - lastAnalysisAt < interval) {
             image.close()
             return
@@ -75,7 +91,7 @@ class DataMatrixAnalyzer(
             val outputHeight = if (rotation == 90 || rotation == 270) crop.width() else crop.height()
             frameNumber += 1
             val fastResults = fastReader.read(image)
-            val hardEvery = if (fullScreen) 4L else 5L
+            val hardEvery = 3L
             val results = if (frameNumber % hardEvery == 0L) fastResults + hardReader.read(image) else fastResults
             val decoded = results.mapNotNull { result ->
                 val bytes = result.bytes ?: return@mapNotNull null
@@ -99,13 +115,55 @@ class DataMatrixAnalyzer(
                     )
                 )
             }.distinctBy { it.rawBytes.contentHashCode() }
-            onDecoded(decoded)
+            if (decoded.isEmpty()) {
+                onDecoded(emptyList())
+            } else {
+                val uncapturedKeys = decoded.mapNotNull { item ->
+                    Base64.encodeToString(item.rawBytes, Base64.NO_WRAP).takeIf { it !in capturedKeys }
+                }.toSet()
+                val frame = if (uncapturedKeys.isNotEmpty()) captureVisibleFrame(image) else null
+                uncapturedKeys.forEach { capturedKeys[it] = Unit }
+                onDecoded(decoded.map { item ->
+                    val key = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)
+                    if (frame != null && key in uncapturedKeys) {
+                        item.copy(capturedFrame = frame)
+                    } else item
+                })
+            }
         } catch (_: Throwable) {
             // A malformed frame must never stop the camera analyzer.
         } finally {
             image.close()
         }
     }
+}
+
+private fun captureVisibleFrame(image: ImageProxy): CapturedFrame? = try {
+    val full = image.toBitmap()
+    val crop = image.cropRect
+    val left = crop.left.coerceIn(0, full.width - 1)
+    val top = crop.top.coerceIn(0, full.height - 1)
+    val width = crop.width().coerceAtMost(full.width - left).coerceAtLeast(1)
+    val height = crop.height().coerceAtMost(full.height - top).coerceAtLeast(1)
+    val cropped = Bitmap.createBitmap(full, left, top, width, height)
+    if (cropped !== full) full.recycle()
+    val rotation = image.imageInfo.rotationDegrees
+    val oriented = if (rotation == 0) cropped else Bitmap.createBitmap(
+        cropped,
+        0,
+        0,
+        cropped.width,
+        cropped.height,
+        Matrix().apply { postRotate(rotation.toFloat()) },
+        true
+    ).also { if (it !== cropped) cropped.recycle() }
+    val stream = ByteArrayOutputStream()
+    oriented.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+    val jpeg = stream.toByteArray()
+    val hash = MessageDigest.getInstance("SHA-256").digest(jpeg).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    CapturedFrame(jpeg, oriented.width, oriented.height, hash).also { oriented.recycle() }
+} catch (_: Throwable) {
+    null
 }
 
 private fun Point.normalize(width: Int, height: Int) = NormalizedPoint(

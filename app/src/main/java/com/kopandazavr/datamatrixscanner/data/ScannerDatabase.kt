@@ -5,9 +5,11 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import com.kopandazavr.datamatrixscanner.scanner.CapturedFrame
+import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import java.security.MessageDigest
 
-class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db", null, 2) {
+class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db", null, 3) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE codes (
@@ -26,7 +28,9 @@ class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db"
                 is_duplicate INTEGER NOT NULL DEFAULT 0,
                 duplicate_count INTEGER NOT NULL DEFAULT 0,
                 is_scanned INTEGER NOT NULL DEFAULT 0,
-                batch_id INTEGER NOT NULL
+                batch_id INTEGER NOT NULL,
+                scan_frame_id INTEGER,
+                scan_frame_box TEXT
             )""".trimIndent()
         )
         db.execSQL("CREATE INDEX idx_codes_hash ON codes(sha256)")
@@ -43,10 +47,16 @@ class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db"
         )
         db.execSQL("CREATE INDEX idx_events_code_time ON events(code_id, event_at, id)")
         createRecoveryTable(db)
+        createScanFramesTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createRecoveryTable(db)
+        if (oldVersion < 3) {
+            createScanFramesTable(db)
+            db.execSQL("ALTER TABLE codes ADD COLUMN scan_frame_id INTEGER")
+            db.execSQL("ALTER TABLE codes ADD COLUMN scan_frame_box TEXT")
+        }
     }
 
     private fun createRecoveryTable(db: SQLiteDatabase) {
@@ -65,6 +75,19 @@ class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db"
         )
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_recovery_time ON recovery_candidates(detected_at DESC, id DESC)")
     }
+
+    private fun createScanFramesTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS scan_frames (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sha256 TEXT NOT NULL UNIQUE,
+                jpeg BLOB NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                captured_at INTEGER NOT NULL
+            )""".trimIndent()
+        )
+    }
 }
 
 class CodeRepository(context: Context) {
@@ -78,6 +101,8 @@ class CodeRepository(context: Context) {
         contentType: String,
         fallbackText: String?,
         batchId: Long,
+        capturedFrame: CapturedFrame? = null,
+        detectionBox: DetectionBox? = null,
         now: Long = System.currentTimeMillis()
     ): ScanOutcome {
         val hash = MessageDigest.getInstance("SHA-256").digest(rawBytes).toHex()
@@ -87,6 +112,7 @@ class CodeRepository(context: Context) {
         try {
             val existing = findExact(db, hash, rawBytes)
             if (existing == null) {
+                val frameId = capturedFrame?.let { getOrCreateFrame(db, it, now) }
                 val values = ContentValues().apply {
                     put("raw_bytes", rawBytes)
                     put("sha256", hash)
@@ -100,6 +126,8 @@ class CodeRepository(context: Context) {
                     put("last_scan_at", now)
                     put("status", RecordStatus.ACTIVE.name)
                     put("batch_id", batchId)
+                    put("scan_frame_id", frameId)
+                    put("scan_frame_box", detectionBox?.serialize())
                 }
                 val id = db.insertOrThrow("codes", null, values)
                 addEvent(db, id, now, EventType.FIRST_SCANNED)
@@ -107,17 +135,31 @@ class CodeRepository(context: Context) {
                 return ScanOutcome.New(requireNotNull(getById(db, id)))
             }
             if (existing.status == RecordStatus.ACTIVE) {
+                if (existing.scanFrameId == null && capturedFrame != null && detectionBox != null) {
+                    val frameId = getOrCreateFrame(db, capturedFrame, now)
+                    db.execSQL(
+                        "UPDATE codes SET scan_frame_id=?, scan_frame_box=? WHERE id=?",
+                        arrayOf<Any>(frameId, detectionBox.serialize(), existing.id)
+                    )
+                }
                 db.setTransactionSuccessful()
-                return ScanOutcome.IgnoredActive(existing)
+                return ScanOutcome.IgnoredActive(requireNotNull(getById(db, existing.id)))
             }
 
             val from = existing.status
             val wasArchived = from == RecordStatus.ARCHIVED
-            db.execSQL(
-                """UPDATE codes SET status=?, last_scan_at=?, is_scanned=0, is_duplicate=?,
-                    duplicate_count=duplicate_count+? WHERE id=?""".trimIndent(),
-                arrayOf<Any>(RecordStatus.ACTIVE.name, now, if (wasArchived) 1 else 0, if (wasArchived) 1 else 0, existing.id)
-            )
+            val frameId = existing.scanFrameId ?: capturedFrame?.let { getOrCreateFrame(db, it, now) }
+            val frameBox = if (existing.scanFrameId == null) detectionBox?.serialize() else null
+            val values = ContentValues().apply {
+                put("status", RecordStatus.ACTIVE.name)
+                put("last_scan_at", now)
+                put("is_scanned", 0)
+                put("is_duplicate", if (wasArchived) 1 else 0)
+                put("duplicate_count", existing.duplicateCount + if (wasArchived) 1 else 0)
+                if (frameId != null) put("scan_frame_id", frameId)
+                if (frameBox != null) put("scan_frame_box", frameBox)
+            }
+            db.update("codes", values, "id=?", arrayOf(existing.id.toString()))
             addEvent(db, existing.id, now, if (wasArchived) EventType.DUPLICATE_SCANNED else EventType.REPEATED_SCANNED)
             addEvent(
                 db,
@@ -139,6 +181,21 @@ class CodeRepository(context: Context) {
 
     @Synchronized
     fun get(id: Long): CodeRecord? = getById(helper.readableDatabase, id)
+
+    @Synchronized
+    fun scanFrame(codeId: Long): StoredScanFrame? = helper.readableDatabase.rawQuery(
+        """SELECT f.id, f.jpeg, f.width, f.height, c.scan_frame_box
+            FROM codes c JOIN scan_frames f ON f.id=c.scan_frame_id WHERE c.id=?""".trimIndent(),
+        arrayOf(codeId.toString())
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else StoredScanFrame(
+            id = cursor.getLong(0),
+            jpeg = cursor.getBlob(1),
+            width = cursor.getInt(2),
+            height = cursor.getInt(3),
+            box = parseFramePoints(cursor.getString(4))
+        )
+    }
 
     @Synchronized
     fun addRecoveryCandidates(items: List<com.kopandazavr.datamatrixscanner.scanner.DecodedDataMatrix>, now: Long = System.currentTimeMillis()): Int {
@@ -280,6 +337,19 @@ class CodeRepository(context: Context) {
         return null
     }
 
+    private fun getOrCreateFrame(db: SQLiteDatabase, frame: CapturedFrame, now: Long): Long {
+        db.query("scan_frames", arrayOf("id"), "sha256=?", arrayOf(frame.sha256), null, null, null).use {
+            if (it.moveToFirst()) return it.getLong(0)
+        }
+        return db.insertOrThrow("scan_frames", null, ContentValues().apply {
+            put("sha256", frame.sha256)
+            put("jpeg", frame.jpeg)
+            put("width", frame.width)
+            put("height", frame.height)
+            put("captured_at", now)
+        })
+    }
+
     private fun getById(db: SQLiteDatabase, id: Long): CodeRecord? = db.query(
         "codes", null, "id=?", arrayOf(id.toString()), null, null, null
     ).use { if (it.moveToFirst()) it.toRecord() else null }
@@ -310,7 +380,8 @@ private fun Cursor.toRecord() = CodeRecord(
     isDuplicate = getInt(getColumnIndexOrThrow("is_duplicate")) != 0,
     duplicateCount = getInt(getColumnIndexOrThrow("duplicate_count")),
     isScanned = getInt(getColumnIndexOrThrow("is_scanned")) != 0,
-    batchId = getLong(getColumnIndexOrThrow("batch_id"))
+    batchId = getLong(getColumnIndexOrThrow("batch_id")),
+    scanFrameId = getColumnIndex("scan_frame_id").takeIf { it >= 0 && !isNull(it) }?.let(::getLong)
 )
 
 private fun Cursor.toEvent() = ScanEvent(
@@ -334,3 +405,14 @@ private fun Cursor.toRecoveryCandidate() = RecoveryCandidate(
 )
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+private fun DetectionBox.serialize(): String = points.joinToString(";") { "${it.x},${it.y}" }
+
+private fun parseFramePoints(value: String?): List<FramePoint> = value.orEmpty().split(';').mapNotNull { pair ->
+    val parts = pair.split(',')
+    if (parts.size != 2) null else {
+        val x = parts[0].toFloatOrNull()
+        val y = parts[1].toFloatOrNull()
+        if (x == null || y == null) null else FramePoint(x, y)
+    }
+}

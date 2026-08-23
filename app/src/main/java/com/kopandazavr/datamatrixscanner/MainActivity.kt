@@ -2,6 +2,7 @@ package com.kopandazavr.datamatrixscanner
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.util.Size
 import android.widget.Toast
@@ -16,6 +17,7 @@ import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -45,6 +47,8 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
@@ -80,9 +84,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalViewConfiguration
@@ -98,6 +104,7 @@ import com.kopandazavr.datamatrixscanner.data.CodeRecord
 import com.kopandazavr.datamatrixscanner.data.RecordStatus
 import com.kopandazavr.datamatrixscanner.data.RecoveryCandidate
 import com.kopandazavr.datamatrixscanner.data.ScanEvent
+import com.kopandazavr.datamatrixscanner.data.StoredScanFrame
 import com.kopandazavr.datamatrixscanner.scanner.DataMatrixAnalyzer
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
@@ -138,14 +145,13 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
 
     var mode by remember { mutableStateOf(AppMode.LIST) }
     var viewer by remember { mutableStateOf<ViewerState?>(null) }
-    var showHonestSignNotice by remember { mutableStateOf(false) }
     val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val controller = remember(permissionGranted) {
         if (!permissionGranted) null else LifecycleCameraController(context).apply {
             cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             imageAnalysisBackpressureStrategy = ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
-            setImageAnalysisTargetSize(CameraController.OutputSize(Size(1920, 1080)))
+            setImageAnalysisTargetSize(CameraController.OutputSize(Size(1280, 720)))
             imageCaptureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
             setEnabledUseCases(CameraController.IMAGE_ANALYSIS or CameraController.IMAGE_CAPTURE)
             setImageAnalysisAnalyzer(executor, analyzer)
@@ -175,7 +181,6 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             permissionGranted = permissionGranted,
             onCamera = { mode = AppMode.CAMERA },
             onRecovery = { mode = AppMode.RECOVERY },
-            onHonestSign = { showHonestSignNotice = true },
             onOpenViewer = { id, ids ->
                 viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0))
                 mode = AppMode.VIEWER
@@ -194,23 +199,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
         )
         AppMode.RECOVERY -> RecoveryScreen(
             vm = vm,
-            onBack = { mode = AppMode.LIST },
-            onHonestSign = { showHonestSignNotice = true }
-        )
-    }
-
-    if (showHonestSignNotice) {
-        AlertDialog(
-            onDismissRequest = { showHonestSignNotice = false },
-            title = { Text("Проверка в Честном ЗНАКЕ") },
-            text = {
-                Text(
-                    "Кнопка подготовлена, но реальный запрос пока не выполняется. " +
-                        "Официальный True API требует учётную систему и авторизацию участника оборота. " +
-                        "После получения параметров доступа сюда будет подключена повторная пакетная проверка всех кодов текущего списка."
-                )
-            },
-            confirmButton = { TextButton(onClick = { showHonestSignNotice = false }) { Text("Понятно") } }
+            onBack = { mode = AppMode.LIST }
         )
     }
 }
@@ -223,7 +212,6 @@ private fun ListScreen(
     permissionGranted: Boolean,
     onCamera: () -> Unit,
     onRecovery: () -> Unit,
-    onHonestSign: () -> Unit,
     onOpenViewer: (Long, List<Long>) -> Unit
 ) {
     val section by vm.section.collectAsState()
@@ -244,7 +232,6 @@ private fun ListScreen(
                     title = { Text(section.title()) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFF8FAFC)),
                     actions = {
-                        TextButton(onClick = onHonestSign) { Text("Честный ЗНАК") }
                         Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Раздел") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -266,7 +253,7 @@ private fun ListScreen(
                     controller = controller,
                     permissionGranted = permissionGranted,
                     boxes = boxes,
-                    modifier = Modifier.fillMaxWidth().height(if (largePreview) 174.dp else 87.dp),
+                    modifier = Modifier.fillMaxWidth().height(if (largePreview) 348.dp else 174.dp),
                     onClick = { largePreview = !largePreview },
                     onFullscreen = onCamera
                 )
@@ -378,7 +365,7 @@ private fun RecordRow(
     val platformConfiguration = LocalViewConfiguration.current
     val oneSecondLongPress = remember(platformConfiguration) {
         object : ViewConfiguration by platformConfiguration {
-            override val longPressTimeoutMillis: Long = 1_000L
+            override val longPressTimeoutMillis: Long = 500L
         }
     }
 
@@ -529,9 +516,56 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
     }
 }
 
+@Composable
+private fun StoredFrameImage(frame: StoredScanFrame, modifier: Modifier = Modifier) {
+    val bitmap = remember(frame.id) {
+        BitmapFactory.decodeByteArray(frame.jpeg, 0, frame.jpeg.size)?.asImageBitmap()
+    }
+    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+        bitmap?.let {
+            Image(it, "Кадр распознавания", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+        }
+        Canvas(Modifier.fillMaxSize()) {
+            if (frame.box.size < 4) return@Canvas
+            val imageAspect = frame.width.toFloat() / frame.height.coerceAtLeast(1)
+            val canvasAspect = size.width / size.height.coerceAtLeast(1f)
+            val contentWidth: Float
+            val contentHeight: Float
+            val left: Float
+            val top: Float
+            if (canvasAspect > imageAspect) {
+                contentHeight = size.height
+                contentWidth = contentHeight * imageAspect
+                left = (size.width - contentWidth) / 2f
+                top = 0f
+            } else {
+                contentWidth = size.width
+                contentHeight = contentWidth / imageAspect
+                left = 0f
+                top = (size.height - contentHeight) / 2f
+            }
+            val centerX = frame.box.map { it.x }.average().toFloat()
+            val centerY = frame.box.map { it.y }.average().toFloat()
+            val expanded = frame.box.map { point ->
+                // Expand away from the symbol. Do not clamp to the image edge: a
+                // clipped outer border is safer than painting over Data Matrix modules.
+                val x = centerX + (point.x - centerX) * 1.14f
+                val y = centerY + (point.y - centerY) * 1.14f
+                Offset(left + x * contentWidth, top + y * contentHeight)
+            }
+            val path = Path()
+            expanded.forEachIndexed { index, point ->
+                if (index == 0) path.moveTo(point.x, point.y) else path.lineTo(point.x, point.y)
+            }
+            path.close()
+            drawPath(path, Color(0xFF22C55E), style = Stroke(width = 5f))
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RecoveryScreen(vm: AppViewModel, onBack: () -> Unit, onHonestSign: () -> Unit) {
+private fun RecoveryScreen(vm: AppViewModel, onBack: () -> Unit) {
     val candidates by vm.recoveryCandidates.collectAsState()
     val busy by vm.recoveryBusy.collectAsState()
     val message by vm.recoveryMessage.collectAsState()
@@ -545,8 +579,7 @@ private fun RecoveryScreen(vm: AppViewModel, onBack: () -> Unit, onHonestSign: (
         topBar = {
             TopAppBar(
                 title = { Text("Восстановление из фото") },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
-                actions = { TextButton(onClick = onHonestSign) { Text("Проверить в ЧЗ") } }
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } }
             )
         }
     ) { padding ->
@@ -622,10 +655,20 @@ private fun RecoveryCandidateRow(
 private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> Unit) {
     var index by remember { mutableStateOf(initial.index.coerceIn(0, initial.ids.lastIndex.coerceAtLeast(0))) }
     var record by remember { mutableStateOf<CodeRecord?>(null) }
+    var scanFrame by remember { mutableStateOf<StoredScanFrame?>(null) }
+    var showPhoto by remember { mutableStateOf(false) }
     val matrixSize by vm.matrixSize.collectAsState()
     var drag by remember { mutableFloatStateOf(0f) }
     val id = initial.ids.getOrNull(index)
-    LaunchedEffect(id) { id?.let { vm.record(it) { value -> record = value } } }
+    LaunchedEffect(id) {
+        record = null
+        scanFrame = null
+        showPhoto = false
+        id?.let {
+            vm.record(it) { value -> record = value }
+            vm.scanFrame(it) { value -> scanFrame = value }
+        }
+    }
     androidx.activity.compose.BackHandler(onBack = onBack)
 
     fun previous() { if (index > 0) index -= 1 }
@@ -637,6 +680,11 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
                 title = { Text("${index + 1} / ${initial.ids.size}") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
                 actions = {
+                    if (scanFrame != null) {
+                        IconButton(onClick = { showPhoto = !showPhoto }) {
+                            Icon(if (showPhoto) Icons.Default.QrCode2 else Icons.Default.PhotoCamera, if (showPhoto) "Показать Data Matrix" else "Показать кадр")
+                        }
+                    }
                     IconButton(onClick = vm::cycleMatrixSize) { MatrixSizeIcon(matrixSize) }
                 }
             )
@@ -661,25 +709,30 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
             verticalArrangement = Arrangement.Center
         ) {
             if (current == null) Text("Загрузка…") else {
-                val size = listOf(190.dp, 270.dp, 340.dp)[matrixSize]
-                Box(
-                    Modifier
-                        .size(size)
-                        .pointerInput(index) {
-                            detectHorizontalDragGestures(
-                                onDragStart = { drag = 0f },
-                                onHorizontalDrag = { _, amount -> drag += amount },
-                                onDragEnd = {
-                                    if (abs(drag) > 60f) if (drag < 0) next() else previous()
-                                    drag = 0f
-                                }
-                            )
+                val frame = scanFrame
+                if (showPhoto && frame != null) {
+                    StoredFrameImage(frame, Modifier.fillMaxWidth().weight(1f).padding(12.dp))
+                } else {
+                    val size = listOf(190.dp, 270.dp, 340.dp)[matrixSize]
+                    Box(
+                        Modifier
+                            .size(size)
+                            .pointerInput(index) {
+                                detectHorizontalDragGestures(
+                                    onDragStart = { drag = 0f },
+                                    onHorizontalDrag = { _, amount -> drag += amount },
+                                    onDragEnd = {
+                                        if (abs(drag) > 60f) if (drag < 0) next() else previous()
+                                        drag = 0f
+                                    }
+                                )
+                            }
+                    ) {
+                        DataMatrixImage(current.rawBytes, current.isGs1, size)
+                        Row(Modifier.fillMaxSize()) {
+                            Box(Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = { previous() }, onLongClick = {}))
+                            Box(Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = { next() }, onLongClick = {}))
                         }
-                ) {
-                    DataMatrixImage(current.rawBytes, current.isGs1, size)
-                    Row(Modifier.fillMaxSize()) {
-                        Box(Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = { previous() }, onLongClick = {}))
-                        Box(Modifier.weight(1f).fillMaxHeight().combinedClickable(onClick = { next() }, onLongClick = {}))
                     }
                 }
                 Spacer(Modifier.height(24.dp))

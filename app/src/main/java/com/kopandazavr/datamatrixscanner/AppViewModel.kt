@@ -11,6 +11,7 @@ import com.kopandazavr.datamatrixscanner.data.RecordStatus
 import com.kopandazavr.datamatrixscanner.data.RecoveryCandidate
 import com.kopandazavr.datamatrixscanner.data.ScanEvent
 import com.kopandazavr.datamatrixscanner.data.ScanOutcome
+import com.kopandazavr.datamatrixscanner.data.StoredScanFrame
 import com.kopandazavr.datamatrixscanner.scanner.DecodedDataMatrix
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
@@ -93,7 +94,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         symbologyIdentifier = item.symbologyIdentifier,
                         contentType = item.contentType,
                         fallbackText = item.text,
-                        batchId = batchId
+                        batchId = batchId,
+                        capturedFrame = item.capturedFrame,
+                        detectionBox = item.box
                     )
                     val resolved = when (outcome) {
                         is ScanOutcome.New -> {
@@ -210,6 +213,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun record(id: Long, callback: (CodeRecord?) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) { callback(repository.get(id)) }
+    }
+
+    fun scanFrame(id: Long, callback: (StoredScanFrame?) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) { callback(repository.scanFrame(id)) }
     }
 
     fun cycleMatrixSize() {
