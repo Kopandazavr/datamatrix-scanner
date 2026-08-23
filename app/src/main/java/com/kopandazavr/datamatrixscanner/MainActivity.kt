@@ -65,6 +65,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
@@ -89,6 +90,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
@@ -117,6 +119,8 @@ import com.kopandazavr.datamatrixscanner.data.StoredScanFrame
 import com.kopandazavr.datamatrixscanner.scanner.DataMatrixAnalyzer
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
+import com.kopandazavr.datamatrixscanner.scanner.RescueProgress
+import com.kopandazavr.datamatrixscanner.scanner.ScanEnhancementMode
 import com.kopandazavr.datamatrixscanner.ui.DataMatrixImage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -156,6 +160,9 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     var viewer by remember { mutableStateOf<ViewerState?>(null) }
     var largePreview by rememberSaveable { mutableStateOf(true) }
     val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded) }
+    val enhancementMode by vm.scanEnhancementMode.collectAsState()
+    val lastNovelScanAt by vm.lastNovelScanAt.collectAsState()
+    val rescueProgress by analyzer.rescueProgress.collectAsState()
     val executor = remember { Executors.newSingleThreadExecutor() }
     val controller = remember(permissionGranted) {
         if (!permissionGranted) null else LifecycleCameraController(context).apply {
@@ -174,9 +181,16 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             controller?.unbind()
         }
     }
-    DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+    DisposableEffect(Unit) {
+        onDispose {
+            analyzer.close()
+            executor.shutdown()
+        }
+    }
     analyzer.fullScreen = mode == AppMode.CAMERA
     analyzer.visibleHeightFraction = if (mode == AppMode.LIST && !largePreview) .5f else 1f
+    analyzer.enhancementMode = enhancementMode
+    analyzer.lastNovelScanAt = lastNovelScanAt
     LaunchedEffect(mode, controller) {
         if (mode == AppMode.LIST || mode == AppMode.CAMERA) {
             controller?.setImageAnalysisAnalyzer(executor, analyzer)
@@ -191,9 +205,12 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             controller = controller,
             permissionGranted = permissionGranted,
             largePreview = largePreview,
+            rescueProgress = rescueProgress,
+            enhancementMode = enhancementMode,
             onTogglePreview = { largePreview = !largePreview },
             onCamera = { mode = AppMode.CAMERA },
             onRecovery = { mode = AppMode.RECOVERY },
+            onEnhancementMode = vm::setScanEnhancementMode,
             onOpenViewer = { id, ids, source ->
                 viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0), source)
                 mode = AppMode.VIEWER
@@ -203,6 +220,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             vm = vm,
             controller = controller,
             permissionGranted = permissionGranted,
+            rescueProgress = rescueProgress,
             onBack = { mode = AppMode.LIST }
         )
         AppMode.VIEWER -> ViewerScreen(
@@ -224,9 +242,12 @@ private fun ListScreen(
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
     largePreview: Boolean,
+    rescueProgress: RescueProgress?,
+    enhancementMode: ScanEnhancementMode,
     onTogglePreview: () -> Unit,
     onCamera: () -> Unit,
     onRecovery: () -> Unit,
+    onEnhancementMode: (ScanEnhancementMode) -> Unit,
     onOpenViewer: (Long, List<Long>, RecordStatus) -> Unit
 ) {
     val section by vm.section.collectAsState()
@@ -234,7 +255,9 @@ private fun ListScreen(
     val boxes by vm.boxes.collectAsState()
     val count by vm.setCount.collectAsState()
     val currentBatchId by vm.batchId.collectAsState()
+    val context = LocalContext.current
     var menu by remember { mutableStateOf(false) }
+    var enhancementDialog by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
@@ -262,6 +285,10 @@ private fun ListScreen(
                                     text = { Text("Восстановить из фото") },
                                     onClick = { menu = false; onRecovery() }
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Усиление: ${enhancementMode.title}") },
+                                    onClick = { menu = false; enhancementDialog = true }
+                                )
                             }
                         }
                     }
@@ -274,8 +301,19 @@ private fun ListScreen(
                     sourceHeight = 348.dp,
                     onClick = onTogglePreview,
                     onFullscreen = onCamera,
+                    onPhoto = {
+                        val activeController = controller
+                        if (activeController == null) {
+                            Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
+                        } else {
+                            saveCameraPhoto(context, activeController) { result ->
+                                Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
                     recognizedCount = count,
-                    onNextBatch = vm::nextBatch
+                    onNextBatch = vm::nextBatch,
+                    rescueProgress = rescueProgress
                 )
             }
         },
@@ -332,6 +370,55 @@ private fun ListScreen(
             Spacer(Modifier.height(32.dp))
         }
     }
+
+    if (enhancementDialog) {
+        EnhancementModeDialog(
+            selected = enhancementMode,
+            onSelect = {
+                onEnhancementMode(it)
+                enhancementDialog = false
+            },
+            onDismiss = { enhancementDialog = false }
+        )
+    }
+}
+
+@Composable
+private fun EnhancementModeDialog(
+    selected: ScanEnhancementMode,
+    onSelect: (ScanEnhancementMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Усиление распознавания") },
+        text = {
+            Column {
+                Text("ZXing-C++ сканирует весь кадр, Google — код под центральным прицелом.")
+                Spacer(Modifier.height(10.dp))
+                ScanEnhancementMode.entries.forEach { mode ->
+                    Surface(
+                        onClick = { onSelect(mode) },
+                        color = if (selected == mode) Color(0xFFDDEAFE) else Color.Transparent,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(mode.title, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                            if (mode != ScanEnhancementMode.OFF) {
+                                Text("${mode.decoderAttemptCount} попыток", color = Color.Gray)
+                            }
+                            if (selected == mode) Icon(Icons.Default.Check, null, tint = Color(0xFF2563EB))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } }
+    )
 }
 
 @Composable
@@ -367,8 +454,10 @@ private fun CameraPreview(
     sourceHeight: androidx.compose.ui.unit.Dp? = null,
     onClick: (() -> Unit)? = null,
     onFullscreen: (() -> Unit)? = null,
+    onPhoto: (() -> Unit)? = null,
     recognizedCount: Int? = null,
-    onNextBatch: (() -> Unit)? = null
+    onNextBatch: (() -> Unit)? = null,
+    rescueProgress: RescueProgress? = null
 ) {
     Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
@@ -388,6 +477,7 @@ private fun CameraPreview(
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
+        CameraAimOverlay()
         if (onClick != null) Box(Modifier.fillMaxSize().clickable(onClick = onClick))
         if (recognizedCount != null) {
             Surface(
@@ -416,16 +506,54 @@ private fun CameraPreview(
                 }
             }
         }
-        if (onFullscreen != null) {
+        rescueProgress?.let { progress ->
             Surface(
-                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(44.dp),
-                shape = RoundedCornerShape(10.dp),
-                color = Color.Black.copy(alpha = 0.46f)
+                modifier = Modifier.align(Alignment.TopEnd).padding(8.dp).width(158.dp),
+                shape = RoundedCornerShape(9.dp),
+                color = Color.Black.copy(alpha = .52f)
             ) {
-                IconButton(onClick = onFullscreen) {
-                    Icon(Icons.Default.Fullscreen, "На весь экран", tint = Color.White, modifier = Modifier.size(30.dp))
+                Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                    Text(
+                        "Усиление ${progress.completed} / ${progress.total}",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    LinearProgressIndicator(
+                        progress = { progress.fraction },
+                        modifier = Modifier.fillMaxWidth().height(3.dp),
+                        color = Color(0xFF60A5FA),
+                        trackColor = Color.White.copy(alpha = .25f)
+                    )
                 }
             }
+        }
+        if (onPhoto != null || onFullscreen != null) {
+            Row(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                onPhoto?.let { action -> CameraOverlayButton(action, Icons.Default.CameraAlt, "Сделать фото") }
+                onFullscreen?.let { action -> CameraOverlayButton(action, Icons.Default.Fullscreen, "На весь экран") }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CameraOverlayButton(
+    onClick: () -> Unit,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String
+) {
+    Surface(
+        modifier = Modifier.size(44.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = Color.Black.copy(alpha = 0.46f)
+    ) {
+        IconButton(onClick = onClick) {
+            Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(29.dp))
         }
     }
 }
@@ -567,6 +695,7 @@ private fun FullCameraScreen(
     vm: AppViewModel,
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
+    rescueProgress: RescueProgress?,
     onBack: () -> Unit
 ) {
     val count by vm.setCount.collectAsState()
@@ -574,7 +703,13 @@ private fun FullCameraScreen(
     val context = LocalContext.current
     androidx.activity.compose.BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        CameraPreview(controller, permissionGranted, boxes, Modifier.fillMaxSize())
+        CameraPreview(
+            controller,
+            permissionGranted,
+            boxes,
+            Modifier.fillMaxSize(),
+            rescueProgress = rescueProgress
+        )
         Box(Modifier.fillMaxSize().clickable(onClick = onBack))
         Row(
             Modifier.fillMaxWidth().padding(top = 28.dp, start = 8.dp, end = 16.dp),
@@ -641,6 +776,26 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
             val color = if (box.highlight == DetectionHighlight.DUPLICATE) Color(0xFFFACC15) else Color(0xFF22C55E)
             drawPath(path, color, style = Stroke(width = 6f))
         }
+    }
+}
+
+@Composable
+private fun CameraAimOverlay() {
+    Canvas(Modifier.fillMaxSize()) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        val radius = 23.dp.toPx()
+        val arm = 13.dp.toPx()
+        val gap = 6.dp.toPx()
+        fun cross(color: Color, width: Float) {
+            drawLine(color, Offset(center.x - radius - arm, center.y), Offset(center.x - gap, center.y), width, StrokeCap.Round)
+            drawLine(color, Offset(center.x + gap, center.y), Offset(center.x + radius + arm, center.y), width, StrokeCap.Round)
+            drawLine(color, Offset(center.x, center.y - radius - arm), Offset(center.x, center.y - gap), width, StrokeCap.Round)
+            drawLine(color, Offset(center.x, center.y + gap), Offset(center.x, center.y + radius + arm), width, StrokeCap.Round)
+            drawCircle(color, radius, center, style = Stroke(width))
+        }
+        cross(Color.Black.copy(alpha = .62f), 5.dp.toPx())
+        cross(Color.White.copy(alpha = .92f), 2.dp.toPx())
+        drawCircle(Color.White, 2.5.dp.toPx(), center)
     }
 }
 

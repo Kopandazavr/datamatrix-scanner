@@ -9,6 +9,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
+import kotlinx.coroutines.flow.StateFlow
 import zxingcpp.BarcodeReader
 
 data class NormalizedPoint(val x: Float, val y: Float)
@@ -41,11 +42,16 @@ data class DecodedDataMatrix(
 
 class DataMatrixAnalyzer(
     private val onDecoded: (List<DecodedDataMatrix>) -> Unit
-) : ImageAnalysis.Analyzer {
+) : ImageAnalysis.Analyzer, AutoCloseable {
     @Volatile var fullScreen: Boolean = false
     @Volatile var visibleHeightFraction: Float = 1f
+    @Volatile var enhancementMode: ScanEnhancementMode = ScanEnhancementMode.BALANCED
+    @Volatile var lastNovelScanAt: Long = System.currentTimeMillis()
     private var lastAnalysisAt = 0L
+    private var lastRescueStartedAt = 0L
     private var frameNumber = 0L
+    private val rescueProcessor = RescueDataMatrixProcessor(onDecoded)
+    val rescueProgress: StateFlow<RescueProgress?> = rescueProcessor.progress
     private val capturedKeys = object : LinkedHashMap<String, Unit>(512, .75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Unit>?): Boolean = size > 512
     }
@@ -95,7 +101,9 @@ class DataMatrixAnalyzer(
             frameNumber += 1
             val fastResults = fastReader.read(image)
             val hardEvery = 3L
-            val results = if (frameNumber % hardEvery == 0L) fastResults + hardReader.read(image) else fastResults
+            val results = if (frameNumber % hardEvery == 0L && !rescueProcessor.isRunning) {
+                fastResults + hardReader.read(image)
+            } else fastResults
             val decoded = results.mapNotNull { result ->
                 val bytes = result.bytes ?: return@mapNotNull null
                 if (result.format != BarcodeReader.Format.DATA_MATRIX || result.error != null) return@mapNotNull null
@@ -133,11 +141,25 @@ class DataMatrixAnalyzer(
                     } else item
                 })
             }
+            val mode = enhancementMode
+            if (RescueScanPolicy.shouldStart(now, lastNovelScanAt, lastRescueStartedAt, rescueProcessor.isRunning, mode)) {
+                captureVisibleBitmap(image)?.let { snapshot ->
+                    if (rescueProcessor.start(snapshot, mode)) {
+                        lastRescueStartedAt = now
+                    } else {
+                        snapshot.recycle()
+                    }
+                }
+            }
         } catch (_: Throwable) {
             // A malformed frame must never stop the camera analyzer.
         } finally {
             image.close()
         }
+    }
+
+    override fun close() {
+        rescueProcessor.close()
     }
 }
 
@@ -155,7 +177,7 @@ private fun centeredVisibleCrop(source: Rect, rotation: Int, heightFraction: Flo
     }
 }
 
-private fun captureVisibleFrame(image: ImageProxy): CapturedFrame? = try {
+private fun captureVisibleBitmap(image: ImageProxy): Bitmap? = try {
     val full = image.toBitmap()
     val crop = image.cropRect
     val left = crop.left.coerceIn(0, full.width - 1)
@@ -174,6 +196,13 @@ private fun captureVisibleFrame(image: ImageProxy): CapturedFrame? = try {
         Matrix().apply { postRotate(rotation.toFloat()) },
         true
     ).also { if (it !== cropped) cropped.recycle() }
+    oriented
+} catch (_: Throwable) {
+    null
+}
+
+private fun captureVisibleFrame(image: ImageProxy): CapturedFrame? = try {
+    val oriented = captureVisibleBitmap(image) ?: return null
     val stream = ByteArrayOutputStream()
     oriented.compress(Bitmap.CompressFormat.JPEG, 90, stream)
     val jpeg = stream.toByteArray()

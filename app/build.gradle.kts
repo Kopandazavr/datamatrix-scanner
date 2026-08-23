@@ -14,10 +14,21 @@ android {
         applicationId = "com.kopandazavr.datamatrixscanner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.3.6"
+        versionCode = 11
+        versionName = "0.3.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            providers.gradleProperty("scannerDebugKeystore").orNull?.let { stableKeyPath ->
+                storeFile = file(stableKeyPath)
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
     }
 
     buildTypes {
@@ -63,6 +74,7 @@ dependencies {
 
     implementation("io.github.zxing-cpp:android:3.1.1")
     implementation("com.google.zxing:core:3.5.3")
+    implementation("com.google.mlkit:barcode-scanning:17.3.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     testImplementation("junit:junit:4.13.2")
