@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material3.AlertDialog
@@ -72,6 +73,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -79,6 +81,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -228,6 +231,7 @@ private fun ListScreen(
     val boxes by vm.boxes.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
+    var largePreview by rememberSaveable { mutableStateOf(true) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
 
@@ -262,8 +266,9 @@ private fun ListScreen(
                     controller = controller,
                     permissionGranted = permissionGranted,
                     boxes = boxes,
-                    modifier = Modifier.fillMaxWidth().height(174.dp),
-                    onClick = onCamera
+                    modifier = Modifier.fillMaxWidth().height(if (largePreview) 174.dp else 87.dp),
+                    onClick = { largePreview = !largePreview },
+                    onFullscreen = onCamera
                 )
             }
         },
@@ -327,18 +332,34 @@ private fun CameraPreview(
     permissionGranted: Boolean,
     boxes: List<DetectionBox>,
     modifier: Modifier,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
+    onFullscreen: (() -> Unit)? = null
 ) {
-    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+    Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
             AndroidView(
-                factory = { ctx -> PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER; this.controller = controller } },
+                factory = { ctx -> PreviewView(ctx).apply {
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                    this.controller = controller
+                } },
                 update = { it.controller = controller },
                 modifier = Modifier.fillMaxSize()
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
         if (onClick != null) Box(Modifier.fillMaxSize().clickable(onClick = onClick))
+        if (onFullscreen != null) {
+            Surface(
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(44.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = Color.Black.copy(alpha = 0.46f)
+            ) {
+                IconButton(onClick = onFullscreen) {
+                    Icon(Icons.Default.Fullscreen, "На весь экран", tint = Color.White, modifier = Modifier.size(30.dp))
+                }
+            }
+        }
     }
 }
 
@@ -439,6 +460,7 @@ private fun FullCameraScreen(
     androidx.activity.compose.BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(controller, permissionGranted, boxes, Modifier.fillMaxSize())
+        Box(Modifier.fillMaxSize().clickable(onClick = onBack))
         Row(
             Modifier.fillMaxWidth().padding(top = 28.dp, start = 8.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically
