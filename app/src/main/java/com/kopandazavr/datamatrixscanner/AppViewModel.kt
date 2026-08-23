@@ -254,4 +254,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _records.value = repository.list(_section.value)
         _setCount.value = repository.activeCount(_batchId.value)
     }
+
+    override fun onCleared() {
+        photoDecoder.close()
+        super.onCleared()
+    }
 }

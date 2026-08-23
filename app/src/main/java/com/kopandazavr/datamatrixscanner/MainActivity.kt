@@ -11,8 +11,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
@@ -126,6 +128,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -193,6 +197,25 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             controller?.setImageAnalysisAnalyzer(executor, analyzer)
         } else {
             controller?.clearImageAnalysisAnalyzer()
+        }
+    }
+    LaunchedEffect(mode, controller) {
+        if ((mode == AppMode.LIST || mode == AppMode.CAMERA) && controller != null) {
+            // Give Preview/CameraX half a second to settle, then keep AF/AE/AWB
+            // centred on the visible cross without toggling the torch or EV.
+            delay(500)
+            val point = SurfaceOrientedMeteringPointFactory(1f, 1f)
+                .createPoint(.5f, .5f, .16f)
+            val action = FocusMeteringAction.Builder(
+                point,
+                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
+            )
+                .setAutoCancelDuration(1_500, TimeUnit.MILLISECONDS)
+                .build()
+            while (true) {
+                runCatching { controller.cameraControl.startFocusAndMetering(action) }
+                delay(2_000)
+            }
         }
     }
 

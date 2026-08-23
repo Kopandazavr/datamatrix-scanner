@@ -15,7 +15,13 @@ internal enum class VariantKind {
     CLAHE,
     GAMMA_060,
     GAMMA_160,
-    SHARPEN
+    SHARPEN,
+    RED_CHANNEL,
+    GREEN_CHANNEL,
+    BLUE_CHANNEL,
+    MIN_CHANNEL,
+    ADAPTIVE_MEAN,
+    MORPH_CLOSE
 }
 
 internal data class ImageVariantSpec(
@@ -26,6 +32,15 @@ internal data class ImageVariantSpec(
 internal data class ImageVariant(val bitmap: Bitmap, val owned: Boolean)
 
 internal object ImageVariantFactory {
+    fun photoSpecs(): List<ImageVariantSpec> = specs(ScanEnhancementMode.AGGRESSIVE) + listOf(
+        ImageVariantSpec(VariantKind.RED_CHANNEL, BarcodeReader.Binarizer.LOCAL_AVERAGE),
+        ImageVariantSpec(VariantKind.GREEN_CHANNEL, BarcodeReader.Binarizer.LOCAL_AVERAGE),
+        ImageVariantSpec(VariantKind.BLUE_CHANNEL, BarcodeReader.Binarizer.LOCAL_AVERAGE),
+        ImageVariantSpec(VariantKind.MIN_CHANNEL, BarcodeReader.Binarizer.LOCAL_AVERAGE),
+        ImageVariantSpec(VariantKind.ADAPTIVE_MEAN, BarcodeReader.Binarizer.FIXED_THRESHOLD),
+        ImageVariantSpec(VariantKind.MORPH_CLOSE, BarcodeReader.Binarizer.FIXED_THRESHOLD)
+    )
+
     fun specs(mode: ScanEnhancementMode): List<ImageVariantSpec> {
         if (mode == ScanEnhancementMode.OFF) return emptyList()
         val balanced = listOf(
@@ -56,6 +71,12 @@ internal object ImageVariantFactory {
         VariantKind.OTSU -> otsu(source)
         VariantKind.CLAHE -> clahe(source)
         VariantKind.SHARPEN -> sharpen(source)
+        VariantKind.RED_CHANNEL -> channel(source, 16)
+        VariantKind.GREEN_CHANNEL -> channel(source, 8)
+        VariantKind.BLUE_CHANNEL -> channel(source, 0)
+        VariantKind.MIN_CHANNEL -> minimumChannel(source)
+        VariantKind.ADAPTIVE_MEAN -> adaptiveMean(source)
+        VariantKind.MORPH_CLOSE -> morphologicalClose(source)
     }
 
     private fun contrastLut(factor: Float) = IntArray(256) { value ->
@@ -169,6 +190,77 @@ internal object ImageVariantFactory {
             output[index] = (gray[index] + .5f * (gray[index] - neighbours / 4f)).toInt().coerceIn(0, 255)
         }
         return ImageVariant(toBitmap(output, width, height), true)
+    }
+
+    private fun channel(source: Bitmap, shift: Int): ImageVariant {
+        val pixels = IntArray(source.width * source.height)
+        source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
+        val gray = IntArray(pixels.size) { index -> pixels[index] shr shift and 0xff }
+        return ImageVariant(toBitmap(gray, source.width, source.height), true)
+    }
+
+    private fun minimumChannel(source: Bitmap): ImageVariant {
+        val pixels = IntArray(source.width * source.height)
+        source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
+        val gray = IntArray(pixels.size) { index ->
+            val color = pixels[index]
+            minOf(color shr 16 and 0xff, color shr 8 and 0xff, color and 0xff)
+        }
+        return ImageVariant(toBitmap(gray, source.width, source.height), true)
+    }
+
+    /** Integral-image adaptive threshold for uneven illumination and shadows. */
+    private fun adaptiveMean(source: Bitmap): ImageVariant {
+        val width = source.width
+        val height = source.height
+        val gray = grayscale(source)
+        val stride = width + 1
+        val integral = LongArray((width + 1) * (height + 1))
+        for (y in 1..height) {
+            var rowSum = 0L
+            for (x in 1..width) {
+                rowSum += gray[(y - 1) * width + x - 1]
+                integral[y * stride + x] = integral[(y - 1) * stride + x] + rowSum
+            }
+        }
+        val radius = (minOf(width, height) / 18).coerceIn(4, 48)
+        val output = IntArray(gray.size)
+        for (y in 0 until height) for (x in 0 until width) {
+            val left = (x - radius).coerceAtLeast(0)
+            val top = (y - radius).coerceAtLeast(0)
+            val right = (x + radius + 1).coerceAtMost(width)
+            val bottom = (y + radius + 1).coerceAtMost(height)
+            val sum = integral[bottom * stride + right] - integral[top * stride + right] -
+                integral[bottom * stride + left] + integral[top * stride + left]
+            val count = (right - left) * (bottom - top)
+            val localMean = (sum / count.coerceAtLeast(1)).toInt()
+            output[y * width + x] = if (gray[y * width + x] < localMean - 7) 0 else 255
+        }
+        return ImageVariant(toBitmap(output, width, height), true)
+    }
+
+    /** One conservative 3x3 closing pass for small print gaps and scratches. */
+    private fun morphologicalClose(source: Bitmap): ImageVariant {
+        val binary = otsu(source)
+        val width = source.width
+        val height = source.height
+        val gray = grayscale(binary.bitmap)
+        binary.bitmap.recycle()
+        // Data Matrix modules are black, so close the black foreground by
+        // eroding (minimum) first and dilating (maximum) second.
+        val eroded = gray.copyOf()
+        for (y in 1 until height - 1) for (x in 1 until width - 1) {
+            var value = 255
+            for (dy in -1..1) for (dx in -1..1) value = minOf(value, gray[(y + dy) * width + x + dx])
+            eroded[y * width + x] = value
+        }
+        val closed = eroded.copyOf()
+        for (y in 1 until height - 1) for (x in 1 until width - 1) {
+            var value = 0
+            for (dy in -1..1) for (dx in -1..1) value = maxOf(value, eroded[(y + dy) * width + x + dx])
+            closed[y * width + x] = value
+        }
+        return ImageVariant(toBitmap(closed, width, height), true)
     }
 
     private fun grayscale(source: Bitmap): IntArray {
