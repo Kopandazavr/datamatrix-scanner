@@ -503,7 +503,8 @@ private fun CameraPreview(
                 onClick = onNextBatch,
                 modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).height(44.dp),
                 shape = RoundedCornerShape(10.dp),
-                color = Color.Black.copy(alpha = 0.46f)
+                color = Color.Black.copy(alpha = 0.46f),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = .56f))
             ) {
                 Box(Modifier.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
                     Text("Следующий набор", color = Color.White, fontWeight = FontWeight.SemiBold)
@@ -516,7 +517,7 @@ private fun CameraPreview(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 onTargetedRescue?.let { action ->
-                    CameraOverlayButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр", circular = true)
+                    CameraOverlayButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр")
                 }
                 onPhoto?.let { action -> CameraOverlayButton(action, Icons.Default.CameraAlt, "Сделать фото") }
                 onFullscreen?.let { action -> CameraOverlayButton(action, Icons.Default.Fullscreen, "На весь экран") }
@@ -529,12 +530,11 @@ private fun CameraPreview(
 private fun CameraOverlayButton(
     onClick: () -> Unit,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String,
-    circular: Boolean = false
+    contentDescription: String
 ) {
     Surface(
         modifier = Modifier.size(44.dp),
-        shape = if (circular) androidx.compose.foundation.shape.CircleShape else RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(10.dp),
         color = Color.Black.copy(alpha = 0.46f),
         border = BorderStroke(1.dp, Color.White.copy(alpha = .56f))
     ) {
@@ -786,8 +786,7 @@ private fun FullscreenCameraButton(
         onClick = onClick,
         modifier = Modifier.size(62.dp),
         shape = androidx.compose.foundation.shape.CircleShape,
-        color = Color.Black.copy(alpha = 0.42f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = .62f))
+        color = Color.Black.copy(alpha = 0.42f)
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(34.dp))
