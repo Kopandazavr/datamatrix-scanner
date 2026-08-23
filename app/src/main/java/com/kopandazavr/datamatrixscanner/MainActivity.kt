@@ -19,10 +19,12 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,6 +55,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Restore
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
@@ -89,8 +92,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalViewConfiguration
@@ -99,6 +104,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -131,7 +137,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class AppMode { LIST, CAMERA, VIEWER, RECOVERY }
-private data class ViewerState(val ids: List<Long>, val index: Int)
+private data class ViewerState(val ids: List<Long>, val index: Int, val source: RecordStatus)
 
 @Composable
 private fun ScannerApp(vm: AppViewModel = viewModel()) {
@@ -187,8 +193,8 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             onTogglePreview = { largePreview = !largePreview },
             onCamera = { mode = AppMode.CAMERA },
             onRecovery = { mode = AppMode.RECOVERY },
-            onOpenViewer = { id, ids ->
-                viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0))
+            onOpenViewer = { id, ids, source ->
+                viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0), source)
                 mode = AppMode.VIEWER
             }
         )
@@ -220,11 +226,12 @@ private fun ListScreen(
     onTogglePreview: () -> Unit,
     onCamera: () -> Unit,
     onRecovery: () -> Unit,
-    onOpenViewer: (Long, List<Long>) -> Unit
+    onOpenViewer: (Long, List<Long>, RecordStatus) -> Unit
 ) {
     val section by vm.section.collectAsState()
     val records by vm.records.collectAsState()
     val boxes by vm.boxes.collectAsState()
+    val count by vm.setCount.collectAsState()
     val currentBatchId by vm.batchId.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
@@ -240,15 +247,16 @@ private fun ListScreen(
                     title = { Text(section.title()) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFF8FAFC)),
                     actions = {
+                        RecordStatus.entries.forEach { item ->
+                            SectionButton(
+                                status = item,
+                                selected = section == item,
+                                onClick = { vm.setSection(item) }
+                            )
+                        }
                         Box {
-                            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Раздел") }
+                            IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Меню") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                                RecordStatus.entries.forEach { item ->
-                                    DropdownMenuItem(
-                                        text = { Text(item.title()) },
-                                        onClick = { menu = false; vm.setSection(item) }
-                                    )
-                                }
                                 DropdownMenuItem(
                                     text = { Text("Восстановить из фото") },
                                     onClick = { menu = false; onRecovery() }
@@ -264,7 +272,9 @@ private fun ListScreen(
                     modifier = Modifier.fillMaxWidth().height(if (largePreview) 348.dp else 174.dp),
                     sourceHeight = 348.dp,
                     onClick = onTogglePreview,
-                    onFullscreen = onCamera
+                    onFullscreen = onCamera,
+                    recognizedCount = count,
+                    onNextBatch = vm::nextBatch
                 )
             }
         },
@@ -295,7 +305,7 @@ private fun ListScreen(
                         onClick = {
                             selection = selection.toggle(record.id, records.map(CodeRecord::id))
                         },
-                        onMatrix = { onOpenViewer(record.id, records.map(CodeRecord::id)) },
+                        onMatrix = { onOpenViewer(record.id, records.map(CodeRecord::id), section) },
                         onStatus = {
                             eventRecord = record
                             vm.events(record.id) { events = it }
@@ -324,6 +334,30 @@ private fun ListScreen(
 }
 
 @Composable
+private fun SectionButton(status: RecordStatus, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.padding(horizontal = 2.dp).size(42.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) Color(0xFFDDEAFE) else Color.Transparent,
+        border = if (selected) BorderStroke(1.dp, Color(0xFF60A5FA)) else null
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                imageVector = when (status) {
+                    RecordStatus.ACTIVE -> Icons.Default.Visibility
+                    RecordStatus.ARCHIVED -> Icons.Default.Archive
+                    RecordStatus.TRASH -> Icons.Default.Delete
+                },
+                contentDescription = status.title(),
+                tint = if (selected) Color(0xFF1D4ED8) else Color(0xFF475569),
+                modifier = Modifier.size(25.dp)
+            )
+        }
+    }
+}
+
+@Composable
 private fun CameraPreview(
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
@@ -331,7 +365,9 @@ private fun CameraPreview(
     modifier: Modifier,
     sourceHeight: androidx.compose.ui.unit.Dp? = null,
     onClick: (() -> Unit)? = null,
-    onFullscreen: (() -> Unit)? = null
+    onFullscreen: (() -> Unit)? = null,
+    recognizedCount: Int? = null,
+    onNextBatch: (() -> Unit)? = null
 ) {
     Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
@@ -352,6 +388,33 @@ private fun CameraPreview(
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
         if (onClick != null) Box(Modifier.fillMaxSize().clickable(onClick = onClick))
+        if (recognizedCount != null) {
+            Surface(
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
+                shape = RoundedCornerShape(9.dp),
+                color = Color.Black.copy(alpha = 0.46f)
+            ) {
+                Text(
+                    "Распознано: $recognizedCount",
+                    color = Color.White,
+                    fontSize = 19.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                )
+            }
+        }
+        if (onNextBatch != null) {
+            Surface(
+                onClick = onNextBatch,
+                modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).height(44.dp),
+                shape = RoundedCornerShape(10.dp),
+                color = Color.Black.copy(alpha = 0.46f)
+            ) {
+                Box(Modifier.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
+                    Text("Следующий набор", color = Color.White, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
         if (onFullscreen != null) {
             Surface(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(44.dp),
@@ -417,12 +480,11 @@ private fun RecordRow(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
                 Text(record.displayText, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Text(formatTime(record.lastScanAt), fontSize = 13.sp, color = Color.DarkGray)
-                TextButton(
-                    onClick = { if (selectionMode) onClick() else onStatus() },
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
-                ) {
-                    Text(if (record.isDuplicate) "Дубликат ×${record.duplicateCount}" else "Уникальный", fontSize = 13.sp)
-                }
+                StatusTag(
+                    duplicate = record.isDuplicate,
+                    duplicateCount = record.duplicateCount,
+                    onClick = { if (selectionMode) onClick() else onStatus() }
+                )
             }
             Button(
                 onClick = { if (selectionMode) onClick() else onScanned(true) },
@@ -438,6 +500,32 @@ private fun RecordRow(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun StatusTag(duplicate: Boolean, duplicateCount: Int? = null, onClick: (() -> Unit)? = null) {
+    val background = if (duplicate) Color(0xFFFEE2E2) else Color(0xFFDCFCE7)
+    val foreground = if (duplicate) Color(0xFFB91C1C) else Color(0xFF15803D)
+    val label = if (duplicate) {
+        duplicateCount?.let { "Дубликат ×$it" } ?: "Дубликат"
+    } else {
+        "Уникальный"
+    }
+    Surface(
+        onClick = onClick ?: {},
+        enabled = onClick != null,
+        modifier = Modifier.padding(top = 5.dp),
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = background
+    ) {
+        Text(
+            label,
+            color = foreground,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+        )
     }
 }
 
@@ -550,44 +638,78 @@ private fun StoredFrameImage(frame: StoredScanFrame, modifier: Modifier = Modifi
     val bitmap = remember(frame.id) {
         BitmapFactory.decodeByteArray(frame.jpeg, 0, frame.jpeg.size)?.asImageBitmap()
     }
-    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
-        bitmap?.let {
-            Image(it, "Кадр распознавания", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-        }
-        Canvas(Modifier.fillMaxSize()) {
-            if (frame.box.size < 4) return@Canvas
-            val imageAspect = frame.width.toFloat() / frame.height.coerceAtLeast(1)
-            val canvasAspect = size.width / size.height.coerceAtLeast(1f)
-            val contentWidth: Float
-            val contentHeight: Float
-            val left: Float
-            val top: Float
-            if (canvasAspect > imageAspect) {
-                contentHeight = size.height
-                contentWidth = contentHeight * imageAspect
-                left = (size.width - contentWidth) / 2f
-                top = 0f
-            } else {
-                contentWidth = size.width
-                contentHeight = contentWidth / imageAspect
-                left = 0f
-                top = (size.height - contentHeight) / 2f
+    var scale by remember(frame.id) { mutableStateOf(1f) }
+    var translation by remember(frame.id) { mutableStateOf(Offset.Zero) }
+    var viewport by remember(frame.id) { mutableStateOf(IntSize.Zero) }
+
+    Box(
+        modifier
+            .clipToBounds()
+            .background(Color.Black)
+            .onSizeChanged { viewport = it }
+            .pointerInput(frame.id) {
+                detectTransformGestures { _, pan, zoom, _ ->
+                    val nextScale = (scale * zoom).coerceIn(1f, 5f)
+                    val maxX = viewport.width * (nextScale - 1f) / 2f
+                    val maxY = viewport.height * (nextScale - 1f) / 2f
+                    scale = nextScale
+                    translation = Offset(
+                        x = (translation.x + pan.x).coerceIn(-maxX, maxX),
+                        y = (translation.y + pan.y).coerceIn(-maxY, maxY)
+                    )
+                    if (nextScale == 1f) translation = Offset.Zero
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = translation.x
+                    translationY = translation.y
+                }
+        ) {
+            bitmap?.let {
+                Image(it, "Кадр распознавания", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
             }
-            val centerX = frame.box.map { it.x }.average().toFloat()
-            val centerY = frame.box.map { it.y }.average().toFloat()
-            val expanded = frame.box.map { point ->
-                // Expand away from the symbol. Do not clamp to the image edge: a
-                // clipped outer border is safer than painting over Data Matrix modules.
-                val x = centerX + (point.x - centerX) * 1.14f
-                val y = centerY + (point.y - centerY) * 1.14f
-                Offset(left + x * contentWidth, top + y * contentHeight)
+            Canvas(Modifier.fillMaxSize()) {
+                if (frame.box.size < 4) return@Canvas
+                val imageAspect = frame.width.toFloat() / frame.height.coerceAtLeast(1)
+                val canvasAspect = size.width / size.height.coerceAtLeast(1f)
+                val contentWidth: Float
+                val contentHeight: Float
+                val left: Float
+                val top: Float
+                if (canvasAspect > imageAspect) {
+                    contentHeight = size.height
+                    contentWidth = contentHeight * imageAspect
+                    left = (size.width - contentWidth) / 2f
+                    top = 0f
+                } else {
+                    contentWidth = size.width
+                    contentHeight = contentWidth / imageAspect
+                    left = 0f
+                    top = (size.height - contentHeight) / 2f
+                }
+                val centerX = frame.box.map { it.x }.average().toFloat()
+                val centerY = frame.box.map { it.y }.average().toFloat()
+                val expanded = frame.box.map { point ->
+                    // Expand away from the symbol. Do not clamp to the image edge: a
+                    // clipped outer border is safer than painting over Data Matrix modules.
+                    val x = centerX + (point.x - centerX) * 1.14f
+                    val y = centerY + (point.y - centerY) * 1.14f
+                    Offset(left + x * contentWidth, top + y * contentHeight)
+                }
+                val path = Path()
+                expanded.forEachIndexed { index, point ->
+                    if (index == 0) path.moveTo(point.x, point.y) else path.lineTo(point.x, point.y)
+                }
+                path.close()
+                drawPath(path, Color(0xFF22C55E), style = Stroke(width = 5f / scale))
             }
-            val path = Path()
-            expanded.forEachIndexed { index, point ->
-                if (index == 0) path.moveTo(point.x, point.y) else path.lineTo(point.x, point.y)
-            }
-            path.close()
-            drawPath(path, Color(0xFF22C55E), style = Stroke(width = 5f))
         }
     }
 }
@@ -682,17 +804,25 @@ private fun RecoveryCandidateRow(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> Unit) {
+    var viewerIds by remember(initial.ids) { mutableStateOf(initial.ids) }
     val initialPage = initial.index.coerceIn(0, initial.ids.lastIndex.coerceAtLeast(0))
-    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { initial.ids.size })
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { viewerIds.size })
     val scope = rememberCoroutineScope()
     var records by remember { mutableStateOf<Map<Long, CodeRecord>>(emptyMap()) }
     var scanFrame by remember { mutableStateOf<StoredScanFrame?>(null) }
     var showPhoto by remember { mutableStateOf(false) }
+    var pendingPage by remember { mutableStateOf<Int?>(null) }
     val matrixSize by vm.matrixSize.collectAsState()
-    val currentId = initial.ids.getOrNull(pagerState.currentPage)
+    val displayedPage = pagerState.currentPage.coerceAtMost(viewerIds.lastIndex.coerceAtLeast(0))
+    val currentId = viewerIds.getOrNull(displayedPage)
     val current = currentId?.let(records::get)
 
     LaunchedEffect(initial.ids) { vm.records(initial.ids) { records = it } }
+    LaunchedEffect(viewerIds, pendingPage) {
+        val target = pendingPage ?: return@LaunchedEffect
+        if (viewerIds.isNotEmpty()) pagerState.scrollToPage(target.coerceIn(viewerIds.indices))
+        pendingPage = null
+    }
     LaunchedEffect(currentId) {
         scanFrame = null
         showPhoto = false
@@ -701,13 +831,13 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
     androidx.activity.compose.BackHandler(onBack = onBack)
 
     fun animateTo(page: Int) {
-        if (page in initial.ids.indices) scope.launch { pagerState.animateScrollToPage(page) }
+        if (page in viewerIds.indices) scope.launch { pagerState.animateScrollToPage(page) }
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("${pagerState.currentPage + 1} / ${initial.ids.size}") },
+                title = { Text("${displayedPage + 1} / ${viewerIds.size}") },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
                 actions = {
                     if (scanFrame != null) {
@@ -725,9 +855,19 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
                     current?.let { record ->
                         if (!record.isScanned) {
                             vm.setScanned(record.id, true) { }
-                            records = records + (record.id to record.copy(isScanned = true, status = RecordStatus.ARCHIVED))
                         }
-                        animateTo(pagerState.currentPage + 1)
+                        if (initial.source != RecordStatus.ARCHIVED) {
+                            val remaining = viewerIds.filterNot { it == record.id }
+                            if (remaining.isEmpty()) {
+                                onBack()
+                            } else {
+                                records = records - record.id
+                                pendingPage = nextViewerIndexAfterRemoval(displayedPage, remaining.size)
+                                viewerIds = remaining
+                            }
+                        } else {
+                            animateTo(displayedPage + 1)
+                        }
                     }
                 },
                 modifier = Modifier.navigationBarsPadding().fillMaxWidth().padding(16.dp).height(72.dp),
@@ -741,7 +881,7 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
             beyondViewportPageCount = 1,
             pageSpacing = 8.dp
         ) { page ->
-            val pageRecord = initial.ids.getOrNull(page)?.let(records::get)
+            val pageRecord = viewerIds.getOrNull(page)?.let(records::get)
             if (pageRecord == null) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Загрузка…") }
             } else {
@@ -783,7 +923,7 @@ private fun ViewerCard(
             DataMatrixImage(record.rawBytes, record.isGs1, size)
         }
         Spacer(Modifier.height(24.dp))
-        Text(if (record.isDuplicate) "Дубликат" else "Уникальный", fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+        StatusTag(duplicate = record.isDuplicate)
         Text(if (record.isScanned) "Отсканировано" else "Не отсканировано", fontSize = 17.sp)
         Text(record.displayText, Modifier.padding(16.dp), maxLines = 3, overflow = TextOverflow.Ellipsis)
     }
