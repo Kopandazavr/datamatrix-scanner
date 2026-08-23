@@ -213,7 +213,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
                 .setAutoCancelDuration(1_500, TimeUnit.MILLISECONDS)
                 .build()
             while (true) {
-                runCatching { controller.cameraControl.startFocusAndMetering(action) }
+                runCatching { controller.cameraControl?.startFocusAndMetering(action) }
                 delay(2_000)
             }
         }

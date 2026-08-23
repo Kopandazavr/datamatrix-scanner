@@ -229,7 +229,7 @@ class PhotoRecoveryDecoder : AutoCloseable {
         val bytes = result.text.toByteArray(StandardCharsets.ISO_8859_1)
         val symbology = result.resultMetadata?.get(ResultMetadataType.SYMBOLOGY_IDENTIFIER) as? String
         val points = result.resultPoints.orEmpty().map { Point(it.x.toInt(), it.y.toInt()) }
-        val normalized = if (points.size >= 4) points.take(4).map { it.normalize(bitmap.width, bitmap.height) } else listOf(
+        val normalized = if (points.size >= 4) points.take(4).map { it.photoNormalize(bitmap.width, bitmap.height) } else listOf(
             NormalizedPoint(0f, 0f), NormalizedPoint(1f, 0f),
             NormalizedPoint(1f, 1f), NormalizedPoint(0f, 1f)
         )
@@ -258,7 +258,7 @@ class PhotoRecoveryDecoder : AutoCloseable {
         width: Int,
         height: Int
     ) {
-        val normalized = if (points.size >= 4) points.take(4).map { it.normalize(width, height) } else listOf(
+        val normalized = if (points.size >= 4) points.take(4).map { it.photoNormalize(width, height) } else listOf(
             NormalizedPoint(0f, 0f), NormalizedPoint(1f, 0f),
             NormalizedPoint(1f, 1f), NormalizedPoint(0f, 1f)
         )
@@ -396,3 +396,8 @@ class PhotoRecoveryDecoder : AutoCloseable {
 
     override fun close() = googleScanner.close()
 }
+
+private fun Point.photoNormalize(width: Int, height: Int) = NormalizedPoint(
+    x = (x.toFloat() / width.coerceAtLeast(1)).coerceIn(0f, 1f),
+    y = (y.toFloat() / height.coerceAtLeast(1)).coerceIn(0f, 1f)
+)
