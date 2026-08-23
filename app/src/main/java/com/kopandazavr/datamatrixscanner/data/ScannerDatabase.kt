@@ -96,7 +96,7 @@ class CodeRepository(context: Context) {
             db.execSQL(
                 """UPDATE codes SET status=?, last_scan_at=?, is_scanned=0, is_duplicate=?,
                     duplicate_count=duplicate_count+? WHERE id=?""".trimIndent(),
-                arrayOf(RecordStatus.ACTIVE.name, now, if (wasArchived) 1 else 0, if (wasArchived) 1 else 0, existing.id)
+                arrayOf<Any>(RecordStatus.ACTIVE.name, now, if (wasArchived) 1 else 0, if (wasArchived) 1 else 0, existing.id)
             )
             addEvent(db, existing.id, now, if (wasArchived) EventType.DUPLICATE_SCANNED else EventType.REPEATED_SCANNED)
             addEvent(
@@ -142,7 +142,7 @@ class CodeRepository(context: Context) {
             } else {
                 db.execSQL(
                     "UPDATE codes SET is_scanned=?, status=?, is_duplicate=? WHERE id=?",
-                    arrayOf(if (scanned) 1 else 0, targetStatus.name, if (scanned) if (record.isDuplicate) 1 else 0 else 0, id)
+                    arrayOf<Any>(if (scanned) 1 else 0, targetStatus.name, if (scanned) if (record.isDuplicate) 1 else 0 else 0, id)
                 )
                 if (record.isScanned != scanned) {
                     addEvent(db, id, now, if (scanned) EventType.MARKED_SCANNED else EventType.MARKED_UNSCANNED)
@@ -170,7 +170,7 @@ class CodeRepository(context: Context) {
                 val scanned = target == RecordStatus.ARCHIVED
                 db.execSQL(
                     "UPDATE codes SET status=?, is_scanned=?, is_duplicate=? WHERE id=?",
-                    arrayOf(target.name, if (scanned) 1 else 0, if (target == RecordStatus.ARCHIVED && current.isDuplicate) 1 else 0, id)
+                    arrayOf<Any>(target.name, if (scanned) 1 else 0, if (target == RecordStatus.ARCHIVED && current.isDuplicate) 1 else 0, id)
                 )
                 if (current.isScanned != scanned) {
                     addEvent(db, id, now, if (scanned) EventType.MARKED_SCANNED else EventType.MARKED_UNSCANNED)
