@@ -1,28 +1,43 @@
 package com.kopandazavr.datamatrixscanner
 
 import android.app.Application
+import android.net.Uri
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.kopandazavr.datamatrixscanner.data.CodeRecord
 import com.kopandazavr.datamatrixscanner.data.CodeRepository
 import com.kopandazavr.datamatrixscanner.data.RecordStatus
+import com.kopandazavr.datamatrixscanner.data.RecoveryCandidate
 import com.kopandazavr.datamatrixscanner.data.ScanEvent
 import com.kopandazavr.datamatrixscanner.data.ScanOutcome
 import com.kopandazavr.datamatrixscanner.scanner.DecodedDataMatrix
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
+import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
+import com.kopandazavr.datamatrixscanner.scanner.PhotoRecoveryDecoder
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.ConcurrentHashMap
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CodeRepository(application)
     private val prefs = application.getSharedPreferences("scanner_preferences", 0)
     private val scanMutex = Mutex()
+    private val photoDecoder = PhotoRecoveryDecoder()
+    private val decodedFrames = MutableSharedFlow<List<DecodedDataMatrix>>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    private val detectionCache = ConcurrentHashMap<String, DetectionHighlight>()
 
     private val _section = MutableStateFlow(RecordStatus.ACTIVE)
     val section: StateFlow<RecordStatus> = _section.asStateFlow()
@@ -34,11 +49,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val boxes: StateFlow<List<DetectionBox>> = _boxes.asStateFlow()
     private val _matrixSize = MutableStateFlow(prefs.getInt("matrix_size", 1).coerceIn(0, 2))
     val matrixSize: StateFlow<Int> = _matrixSize.asStateFlow()
+    private val _recoveryCandidates = MutableStateFlow<List<RecoveryCandidate>>(emptyList())
+    val recoveryCandidates: StateFlow<List<RecoveryCandidate>> = _recoveryCandidates.asStateFlow()
+    private val _recoveryBusy = MutableStateFlow(false)
+    val recoveryBusy: StateFlow<Boolean> = _recoveryBusy.asStateFlow()
+    private val _recoveryMessage = MutableStateFlow<String?>(null)
+    val recoveryMessage: StateFlow<String?> = _recoveryMessage.asStateFlow()
 
     private var batchId = prefs.getLong("batch_id", 1L)
     private var boxGeneration = 0L
 
-    init { refresh() }
+    init {
+        refresh()
+        refreshRecovery()
+        viewModelScope.launch(Dispatchers.IO) {
+            decodedFrames.collect(::processDecodedFrame)
+        }
+    }
 
     fun setSection(value: RecordStatus) {
         _section.value = value
@@ -46,31 +73,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onDecoded(items: List<DecodedDataMatrix>) {
-        viewModelScope.launch(Dispatchers.IO) {
-            scanMutex.withLock {
-                val newBoxes = mutableListOf<DetectionBox>()
-                var changed = false
-                items.forEach { item ->
-                    when (repository.scan(
+        decodedFrames.tryEmit(items)
+    }
+
+    private suspend fun processDecodedFrame(items: List<DecodedDataMatrix>) {
+        if (items.isEmpty()) {
+            clearBoxesAfterSilence()
+            return
+        }
+        scanMutex.withLock {
+            val visibleBoxes = mutableListOf<DetectionBox>()
+            var changed = false
+            items.forEach { item ->
+                val cacheKey = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)
+                val highlight = detectionCache[cacheKey] ?: run {
+                    val outcome = repository.scan(
                         rawBytes = item.rawBytes,
                         isGs1 = item.isGs1,
                         symbologyIdentifier = item.symbologyIdentifier,
                         contentType = item.contentType,
                         fallbackText = item.text,
                         batchId = batchId
-                    )) {
+                    )
+                    val resolved = when (outcome) {
                         is ScanOutcome.New -> {
                             _setCount.value += 1
-                            newBoxes += item.box
                             changed = true
+                            DetectionHighlight.ACTIVE
                         }
-                        is ScanOutcome.Restored -> changed = true
-                        ScanOutcome.IgnoredActive -> Unit
+                        is ScanOutcome.Restored -> {
+                            changed = true
+                            if (outcome.from == RecordStatus.ARCHIVED) DetectionHighlight.DUPLICATE else DetectionHighlight.ACTIVE
+                        }
+                        is ScanOutcome.IgnoredActive -> {
+                            if (outcome.record.isDuplicate) DetectionHighlight.DUPLICATE else DetectionHighlight.ACTIVE
+                        }
                     }
+                    detectionCache[cacheKey] = resolved
+                    resolved
                 }
-                if (changed) _records.value = repository.list(_section.value)
-                if (newBoxes.isNotEmpty()) showBoxes(newBoxes)
+                visibleBoxes += item.box.copy(highlight = highlight)
             }
+            if (changed) _records.value = repository.list(_section.value)
+            showBoxes(visibleBoxes)
         }
     }
 
@@ -78,7 +123,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val generation = ++boxGeneration
         _boxes.value = newBoxes
         viewModelScope.launch {
-            delay(850)
+            delay(320)
+            if (generation == boxGeneration) _boxes.value = emptyList()
+        }
+    }
+
+    private fun clearBoxesAfterSilence() {
+        val generation = boxGeneration
+        viewModelScope.launch {
+            delay(180)
             if (generation == boxGeneration) _boxes.value = emptyList()
         }
     }
@@ -93,6 +146,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun setScanned(id: Long, scanned: Boolean, after: (() -> Unit)? = null) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.setScanned(id, scanned)
+            detectionCache.clear()
             _records.value = repository.list(_section.value)
             after?.invoke()
         }
@@ -101,8 +155,53 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun move(ids: Set<Long>, target: RecordStatus) {
         viewModelScope.launch(Dispatchers.IO) {
             repository.move(ids, target)
+            detectionCache.clear()
             _records.value = repository.list(_section.value)
         }
+    }
+
+    fun recoverPhoto(uri: Uri) {
+        if (_recoveryBusy.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _recoveryBusy.value = true
+            _recoveryMessage.value = null
+            try {
+                val decoded = photoDecoder.decode(getApplication<Application>().contentResolver, uri)
+                val added = repository.addRecoveryCandidates(decoded)
+                _recoveryCandidates.value = repository.recoveryCandidates()
+                _recoveryMessage.value = when {
+                    decoded.isEmpty() -> "Data Matrix на фотографии восстановить не удалось"
+                    added == 0 -> "Все найденные коды уже есть в списке восстановления"
+                    else -> "Восстановлено: $added"
+                }
+            } catch (_: Throwable) {
+                _recoveryMessage.value = "Не удалось обработать фотографию"
+            } finally {
+                _recoveryBusy.value = false
+            }
+        }
+    }
+
+    fun acceptRecovery(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.acceptRecoveryCandidate(id, batchId)
+            detectionCache.clear()
+            _recoveryCandidates.value = repository.recoveryCandidates()
+            _records.value = repository.list(_section.value)
+        }
+    }
+
+    fun deleteRecovery(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.deleteRecoveryCandidate(id)
+            _recoveryCandidates.value = repository.recoveryCandidates()
+        }
+    }
+
+    fun clearRecoveryMessage() { _recoveryMessage.value = null }
+
+    fun refreshRecovery() {
+        viewModelScope.launch(Dispatchers.IO) { _recoveryCandidates.value = repository.recoveryCandidates() }
     }
 
     fun events(id: Long, callback: (List<ScanEvent>) -> Unit) {

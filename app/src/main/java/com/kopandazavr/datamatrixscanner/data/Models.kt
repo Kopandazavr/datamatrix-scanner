@@ -41,10 +41,22 @@ data class ScanEvent(
     val details: String?
 )
 
+data class RecoveryCandidate(
+    val id: Long,
+    val rawBytes: ByteArray,
+    val isGs1: Boolean,
+    val symbologyIdentifier: String?,
+    val contentType: String,
+    val displayText: String,
+    val gtin: String?,
+    val serial: String?,
+    val detectedAt: Long
+)
+
 sealed interface ScanOutcome {
     data class New(val record: CodeRecord) : ScanOutcome
     data class Restored(val record: CodeRecord, val from: RecordStatus) : ScanOutcome
-    data object IgnoredActive : ScanOutcome
+    data class IgnoredActive(val record: CodeRecord) : ScanOutcome
 }
 
 data class ParsedGs1(val gtin: String?, val serial: String?, val displayText: String)

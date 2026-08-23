@@ -3,18 +3,22 @@ package com.kopandazavr.datamatrixscanner
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Size
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
 import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -45,6 +49,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -88,9 +93,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kopandazavr.datamatrixscanner.data.CodeRecord
 import com.kopandazavr.datamatrixscanner.data.RecordStatus
+import com.kopandazavr.datamatrixscanner.data.RecoveryCandidate
 import com.kopandazavr.datamatrixscanner.data.ScanEvent
 import com.kopandazavr.datamatrixscanner.scanner.DataMatrixAnalyzer
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
+import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
 import com.kopandazavr.datamatrixscanner.ui.DataMatrixImage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -111,7 +118,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppMode { LIST, CAMERA, VIEWER }
+private enum class AppMode { LIST, CAMERA, VIEWER, RECOVERY }
 private data class ViewerState(val ids: List<Long>, val index: Int)
 
 @Composable
@@ -128,13 +135,16 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
 
     var mode by remember { mutableStateOf(AppMode.LIST) }
     var viewer by remember { mutableStateOf<ViewerState?>(null) }
+    var showHonestSignNotice by remember { mutableStateOf(false) }
     val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val controller = remember(permissionGranted) {
         if (!permissionGranted) null else LifecycleCameraController(context).apply {
             cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
             imageAnalysisBackpressureStrategy = ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
-            setEnabledUseCases(CameraController.IMAGE_ANALYSIS)
+            setImageAnalysisTargetSize(CameraController.OutputSize(Size(1920, 1080)))
+            imageCaptureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
+            setEnabledUseCases(CameraController.IMAGE_ANALYSIS or CameraController.IMAGE_CAPTURE)
             setImageAnalysisAnalyzer(executor, analyzer)
             bindToLifecycle(lifecycleOwner)
         }
@@ -147,6 +157,13 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     }
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
     analyzer.fullScreen = mode == AppMode.CAMERA
+    LaunchedEffect(mode, controller) {
+        if (mode == AppMode.LIST || mode == AppMode.CAMERA) {
+            controller?.setImageAnalysisAnalyzer(executor, analyzer)
+        } else {
+            controller?.clearImageAnalysisAnalyzer()
+        }
+    }
 
     when (mode) {
         AppMode.LIST -> ListScreen(
@@ -154,6 +171,8 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             controller = controller,
             permissionGranted = permissionGranted,
             onCamera = { mode = AppMode.CAMERA },
+            onRecovery = { mode = AppMode.RECOVERY },
+            onHonestSign = { showHonestSignNotice = true },
             onOpenViewer = { id, ids ->
                 viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0))
                 mode = AppMode.VIEWER
@@ -170,6 +189,26 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             initial = requireNotNull(viewer),
             onBack = { mode = AppMode.LIST }
         )
+        AppMode.RECOVERY -> RecoveryScreen(
+            vm = vm,
+            onBack = { mode = AppMode.LIST },
+            onHonestSign = { showHonestSignNotice = true }
+        )
+    }
+
+    if (showHonestSignNotice) {
+        AlertDialog(
+            onDismissRequest = { showHonestSignNotice = false },
+            title = { Text("Проверка в Честном ЗНАКЕ") },
+            text = {
+                Text(
+                    "Кнопка подготовлена, но реальный запрос пока не выполняется. " +
+                        "Официальный True API требует учётную систему и авторизацию участника оборота. " +
+                        "После получения параметров доступа сюда будет подключена повторная пакетная проверка всех кодов текущего списка."
+                )
+            },
+            confirmButton = { TextButton(onClick = { showHonestSignNotice = false }) { Text("Понятно") } }
+        )
     }
 }
 
@@ -180,10 +219,13 @@ private fun ListScreen(
     controller: LifecycleCameraController?,
     permissionGranted: Boolean,
     onCamera: () -> Unit,
+    onRecovery: () -> Unit,
+    onHonestSign: () -> Unit,
     onOpenViewer: (Long, List<Long>) -> Unit
 ) {
     val section by vm.section.collectAsState()
     val records by vm.records.collectAsState()
+    val boxes by vm.boxes.collectAsState()
     var menu by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
@@ -198,7 +240,7 @@ private fun ListScreen(
                     title = { Text(section.title()) },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFF8FAFC)),
                     actions = {
-                        IconButton(onClick = onCamera) { Icon(Icons.Default.CameraAlt, "Камера") }
+                        TextButton(onClick = onHonestSign) { Text("Честный ЗНАК") }
                         Box {
                             IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Раздел") }
                             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -208,11 +250,21 @@ private fun ListScreen(
                                         onClick = { menu = false; vm.setSection(item) }
                                     )
                                 }
+                                DropdownMenuItem(
+                                    text = { Text("Восстановить из фото") },
+                                    onClick = { menu = false; onRecovery() }
+                                )
                             }
                         }
                     }
                 )
-                CameraPreview(controller, permissionGranted, Modifier.fillMaxWidth().height(116.dp))
+                CameraPreview(
+                    controller = controller,
+                    permissionGranted = permissionGranted,
+                    boxes = boxes,
+                    modifier = Modifier.fillMaxWidth().height(174.dp),
+                    onClick = onCamera
+                )
             }
         },
         bottomBar = {
@@ -270,15 +322,23 @@ private fun ListScreen(
 }
 
 @Composable
-private fun CameraPreview(controller: LifecycleCameraController?, permissionGranted: Boolean, modifier: Modifier) {
+private fun CameraPreview(
+    controller: LifecycleCameraController?,
+    permissionGranted: Boolean,
+    boxes: List<DetectionBox>,
+    modifier: Modifier,
+    onClick: (() -> Unit)? = null
+) {
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
             AndroidView(
-                factory = { ctx -> PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FIT_CENTER; this.controller = controller } },
+                factory = { ctx -> PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER; this.controller = controller } },
                 update = { it.controller = controller },
                 modifier = Modifier.fillMaxSize()
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
+        DetectionOverlay(boxes)
+        if (onClick != null) Box(Modifier.fillMaxSize().clickable(onClick = onClick))
     }
 }
 
@@ -375,10 +435,10 @@ private fun FullCameraScreen(
 ) {
     val count by vm.setCount.collectAsState()
     val boxes by vm.boxes.collectAsState()
+    val context = LocalContext.current
     androidx.activity.compose.BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        CameraPreview(controller, permissionGranted, Modifier.fillMaxSize())
-        DetectionOverlay(boxes)
+        CameraPreview(controller, permissionGranted, boxes, Modifier.fillMaxSize())
         Row(
             Modifier.fillMaxWidth().padding(top = 28.dp, start = 8.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -391,6 +451,24 @@ private fun FullCameraScreen(
             modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth().padding(16.dp).height(64.dp),
             shape = RoundedCornerShape(16.dp)
         ) { Text("Следующий набор", fontSize = 20.sp) }
+        Surface(
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp).size(62.dp),
+            shape = androidx.compose.foundation.shape.CircleShape,
+            color = Color.Black.copy(alpha = 0.42f)
+        ) {
+            IconButton(
+                onClick = {
+                    val activeController = controller
+                    if (activeController == null) {
+                        Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
+                    } else {
+                        saveCameraPhoto(context, activeController) { result ->
+                            Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            ) { Icon(Icons.Default.CameraAlt, "Сделать фото", tint = Color.White, modifier = Modifier.size(34.dp)) }
+        }
     }
 }
 
@@ -403,16 +481,18 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
             val contentHeight: Float
             val left: Float
             val top: Float
+            // Same FILL_CENTER transform as PreviewView. Usually cropRect already has
+            // the exact canvas aspect, but this also handles a transient resize safely.
             if (canvasAspect > box.imageAspect) {
-                contentHeight = size.height
-                contentWidth = contentHeight * box.imageAspect
-                left = (size.width - contentWidth) / 2f
-                top = 0f
-            } else {
                 contentWidth = size.width
                 contentHeight = contentWidth / box.imageAspect
                 left = 0f
                 top = (size.height - contentHeight) / 2f
+            } else {
+                contentHeight = size.height
+                contentWidth = contentHeight * box.imageAspect
+                left = (size.width - contentWidth) / 2f
+                top = 0f
             }
             val path = Path()
             box.points.forEachIndexed { index, point ->
@@ -421,7 +501,96 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
                 if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             path.close()
-            drawPath(path, Color(0xFF22C55E), style = Stroke(width = 6f))
+            val color = if (box.highlight == DetectionHighlight.DUPLICATE) Color(0xFFFACC15) else Color(0xFF22C55E)
+            drawPath(path, color, style = Stroke(width = 6f))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RecoveryScreen(vm: AppViewModel, onBack: () -> Unit, onHonestSign: () -> Unit) {
+    val candidates by vm.recoveryCandidates.collectAsState()
+    val busy by vm.recoveryBusy.collectAsState()
+    val message by vm.recoveryMessage.collectAsState()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        uri?.let(vm::recoverPhoto)
+    }
+    LaunchedEffect(Unit) { vm.refreshRecovery() }
+    androidx.activity.compose.BackHandler(onBack = onBack)
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Восстановление из фото") },
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
+                actions = { TextButton(onClick = onHonestSign) { Text("Проверить в ЧЗ") } }
+            )
+        }
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            Button(
+                onClick = { picker.launch("image/*") },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth().padding(12.dp).height(54.dp)
+            ) {
+                if (busy) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 3.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Восстанавливаю…")
+                } else {
+                    Icon(Icons.Default.CameraAlt, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Выбрать фотографию")
+                }
+            }
+            if (candidates.isEmpty() && !busy) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("Здесь появятся найденные Data Matrix\nдо добавления в активный список", color = Color.Gray)
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    items(candidates, key = { it.id }) { candidate ->
+                        RecoveryCandidateRow(
+                            candidate = candidate,
+                            onAccept = { vm.acceptRecovery(candidate.id) },
+                            onDelete = { vm.deleteRecovery(candidate.id) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    message?.let {
+        AlertDialog(
+            onDismissRequest = vm::clearRecoveryMessage,
+            title = { Text("Восстановление") },
+            text = { Text(it) },
+            confirmButton = { TextButton(onClick = vm::clearRecoveryMessage) { Text("ОК") } }
+        )
+    }
+}
+
+@Composable
+private fun RecoveryCandidateRow(
+    candidate: RecoveryCandidate,
+    onAccept: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Row(
+        Modifier.fillMaxWidth().height(112.dp).background(Color.White).padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        DataMatrixImage(candidate.rawBytes, candidate.isGs1, 80.dp)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(candidate.displayText, fontWeight = FontWeight.SemiBold, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            Text(formatTime(candidate.detectedAt), fontSize = 12.sp, color = Color.DarkGray)
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            TextButton(onClick = onAccept) { Icon(Icons.Default.Check, null); Text("Принять") }
+            TextButton(onClick = onDelete) { Icon(Icons.Default.Delete, null); Text("Удалить") }
         }
     }
 }

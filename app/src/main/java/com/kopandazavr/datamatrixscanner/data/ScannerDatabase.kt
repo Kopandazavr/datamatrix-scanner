@@ -7,7 +7,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import java.security.MessageDigest
 
-class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db", null, 1) {
+class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             """CREATE TABLE codes (
@@ -42,9 +42,29 @@ class ScannerDatabase(context: Context) : SQLiteOpenHelper(context, "scanner.db"
             )""".trimIndent()
         )
         db.execSQL("CREATE INDEX idx_events_code_time ON events(code_id, event_at, id)")
+        createRecoveryTable(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createRecoveryTable(db)
+    }
+
+    private fun createRecoveryTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS recovery_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_bytes BLOB NOT NULL UNIQUE,
+                is_gs1 INTEGER NOT NULL,
+                symbology_identifier TEXT,
+                content_type TEXT NOT NULL,
+                display_text TEXT NOT NULL,
+                gtin TEXT,
+                serial TEXT,
+                detected_at INTEGER NOT NULL
+            )""".trimIndent()
+        )
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_recovery_time ON recovery_candidates(detected_at DESC, id DESC)")
+    }
 }
 
 class CodeRepository(context: Context) {
@@ -88,7 +108,7 @@ class CodeRepository(context: Context) {
             }
             if (existing.status == RecordStatus.ACTIVE) {
                 db.setTransactionSuccessful()
-                return ScanOutcome.IgnoredActive
+                return ScanOutcome.IgnoredActive(existing)
             }
 
             val from = existing.status
@@ -119,6 +139,66 @@ class CodeRepository(context: Context) {
 
     @Synchronized
     fun get(id: Long): CodeRecord? = getById(helper.readableDatabase, id)
+
+    @Synchronized
+    fun addRecoveryCandidates(items: List<com.kopandazavr.datamatrixscanner.scanner.DecodedDataMatrix>, now: Long = System.currentTimeMillis()): Int {
+        if (items.isEmpty()) return 0
+        val db = helper.writableDatabase
+        var added = 0
+        db.beginTransaction()
+        try {
+            items.forEach { item ->
+                val parsed = Gs1Parser.parse(item.rawBytes, item.text)
+                val result = db.insertWithOnConflict(
+                    "recovery_candidates",
+                    null,
+                    ContentValues().apply {
+                        put("raw_bytes", item.rawBytes)
+                        put("is_gs1", if (item.isGs1) 1 else 0)
+                        put("symbology_identifier", item.symbologyIdentifier)
+                        put("content_type", item.contentType)
+                        put("display_text", parsed.displayText)
+                        put("gtin", parsed.gtin)
+                        put("serial", parsed.serial)
+                        put("detected_at", now)
+                    },
+                    SQLiteDatabase.CONFLICT_IGNORE
+                )
+                if (result != -1L) added += 1
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return added
+    }
+
+    @Synchronized
+    fun recoveryCandidates(): List<RecoveryCandidate> = helper.readableDatabase.query(
+        "recovery_candidates", null, null, null, null, null, "detected_at DESC, id DESC"
+    ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.toRecoveryCandidate()) } }
+
+    @Synchronized
+    fun deleteRecoveryCandidate(id: Long) {
+        helper.writableDatabase.delete("recovery_candidates", "id=?", arrayOf(id.toString()))
+    }
+
+    @Synchronized
+    fun acceptRecoveryCandidate(id: Long, batchId: Long): ScanOutcome? {
+        val candidate = helper.readableDatabase.query(
+            "recovery_candidates", null, "id=?", arrayOf(id.toString()), null, null, null
+        ).use { if (it.moveToFirst()) it.toRecoveryCandidate() else null } ?: return null
+        val outcome = scan(
+            rawBytes = candidate.rawBytes,
+            isGs1 = candidate.isGs1,
+            symbologyIdentifier = candidate.symbologyIdentifier,
+            contentType = candidate.contentType,
+            fallbackText = candidate.displayText,
+            batchId = batchId
+        )
+        deleteRecoveryCandidate(id)
+        return outcome
+    }
 
     @Synchronized
     fun events(codeId: Long): List<ScanEvent> = helper.readableDatabase.query(
@@ -239,6 +319,18 @@ private fun Cursor.toEvent() = ScanEvent(
     timestamp = getLong(getColumnIndexOrThrow("event_at")),
     type = EventType.valueOf(getString(getColumnIndexOrThrow("type"))),
     details = getString(getColumnIndexOrThrow("details"))
+)
+
+private fun Cursor.toRecoveryCandidate() = RecoveryCandidate(
+    id = getLong(getColumnIndexOrThrow("id")),
+    rawBytes = getBlob(getColumnIndexOrThrow("raw_bytes")),
+    isGs1 = getInt(getColumnIndexOrThrow("is_gs1")) != 0,
+    symbologyIdentifier = getString(getColumnIndexOrThrow("symbology_identifier")),
+    contentType = getString(getColumnIndexOrThrow("content_type")),
+    displayText = getString(getColumnIndexOrThrow("display_text")),
+    gtin = getString(getColumnIndexOrThrow("gtin")),
+    serial = getString(getColumnIndexOrThrow("serial")),
+    detectedAt = getLong(getColumnIndexOrThrow("detected_at"))
 )
 
 private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
