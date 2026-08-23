@@ -92,6 +92,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -453,7 +454,7 @@ private fun RecordRow(
         Row(
             Modifier
                 .fillMaxWidth()
-                .height(112.dp)
+                .height(128.dp)
                 .background(
                     when {
                         selected -> Color(0xFFDDEAFE)
@@ -468,13 +469,21 @@ private fun RecordRow(
                 .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
+            Column(
                 Modifier.combinedClickable(
                     onClick = { if (selectionMode) onClick() else onMatrix() },
                     onLongClick = onLongClick
-                )
+                ),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 DataMatrixImage(record.rawBytes, record.isGs1, 80.dp)
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    "№${record.id}",
+                    color = Color(0xFF64748B),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
             }
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
@@ -512,19 +521,21 @@ private fun StatusTag(duplicate: Boolean, duplicateCount: Int? = null, onClick: 
     } else {
         "Уникальный"
     }
-    Surface(
-        onClick = onClick ?: {},
-        enabled = onClick != null,
-        modifier = Modifier.padding(top = 5.dp),
-        shape = androidx.compose.foundation.shape.CircleShape,
-        color = background
+    val interactionModifier = if (onClick == null) Modifier else Modifier.clickable(onClick = onClick)
+    Box(
+        modifier = Modifier
+            .padding(top = 4.dp)
+            .clip(androidx.compose.foundation.shape.CircleShape)
+            .background(background)
+            .then(interactionModifier),
+        contentAlignment = Alignment.Center
     ) {
         Text(
             label,
             color = foreground,
-            fontSize = 13.sp,
+            fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp)
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp)
         )
     }
 }
