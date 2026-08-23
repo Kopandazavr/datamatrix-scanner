@@ -59,6 +59,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -76,6 +77,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -182,11 +185,11 @@ private fun ListScreen(
     val section by vm.section.collectAsState()
     val records by vm.records.collectAsState()
     var menu by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
 
-    LaunchedEffect(section) { selected = emptySet() }
+    LaunchedEffect(section) { selection = RangeSelectionState() }
 
     Scaffold(
         topBar = {
@@ -213,8 +216,11 @@ private fun ListScreen(
             }
         },
         bottomBar = {
-            if (selected.isNotEmpty()) {
-                SelectionBar(section, selected, onMove = { target -> vm.move(selected, target); selected = emptySet() })
+            if (selection.isActive) {
+                SelectionBar(section, selection.selected, onMove = { target ->
+                    vm.move(selection.selected, target)
+                    selection = RangeSelectionState()
+                })
             }
         }
     ) { padding ->
@@ -227,9 +233,14 @@ private fun ListScreen(
                 items(records, key = { it.id }) { record ->
                     RecordRow(
                         record = record,
-                        selected = record.id in selected,
-                        onLongClick = { selected = selected + record.id },
-                        onClick = { if (selected.isNotEmpty()) selected = selected.toggle(record.id) },
+                        selected = record.id in selection.selected,
+                        selectionMode = selection.isActive,
+                        onLongClick = {
+                            selection = selection.selectRange(record.id, records.map(CodeRecord::id))
+                        },
+                        onClick = {
+                            selection = selection.toggle(record.id, records.map(CodeRecord::id))
+                        },
                         onMatrix = { onOpenViewer(record.id, records.map(CodeRecord::id)) },
                         onStatus = {
                             eventRecord = record
@@ -276,35 +287,59 @@ private fun CameraPreview(controller: LifecycleCameraController?, permissionGran
 private fun RecordRow(
     record: CodeRecord,
     selected: Boolean,
+    selectionMode: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit,
     onMatrix: () -> Unit,
     onStatus: () -> Unit,
     onScanned: (Boolean) -> Unit
 ) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .height(112.dp)
-            .background(if (selected) Color(0xFFDDEAFE) else Color.White)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.combinedClickable(onClick = onMatrix, onLongClick = onLongClick)) {
-            DataMatrixImage(record.rawBytes, record.isGs1, 80.dp)
+    val platformConfiguration = LocalViewConfiguration.current
+    val oneSecondLongPress = remember(platformConfiguration) {
+        object : ViewConfiguration by platformConfiguration {
+            override val longPressTimeoutMillis: Long = 1_000L
         }
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-            Text(record.displayText, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text(formatTime(record.lastScanAt), fontSize = 13.sp, color = Color.DarkGray)
-            TextButton(onClick = onStatus, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
-                Text(if (record.isDuplicate) "Дубликат ×${record.duplicateCount}" else "Уникальный", fontSize = 13.sp)
+    }
+
+    CompositionLocalProvider(LocalViewConfiguration provides oneSecondLongPress) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(112.dp)
+                .background(if (selected) Color(0xFFDDEAFE) else Color.White)
+                .combinedClickable(
+                    onClick = { if (selectionMode) onClick() },
+                    onLongClick = onLongClick
+                )
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                Modifier.combinedClickable(
+                    onClick = { if (selectionMode) onClick() else onMatrix() },
+                    onLongClick = onLongClick
+                )
+            ) {
+                DataMatrixImage(record.rawBytes, record.isGs1, 80.dp)
             }
-        }
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Checkbox(checked = record.status == RecordStatus.ARCHIVED, onCheckedChange = onScanned)
-            Text(if (record.status == RecordStatus.ARCHIVED) "В архиве" else "В архив", fontSize = 10.sp)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                Text(record.displayText, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(formatTime(record.lastScanAt), fontSize = 13.sp, color = Color.DarkGray)
+                TextButton(
+                    onClick = { if (selectionMode) onClick() else onStatus() },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                ) {
+                    Text(if (record.isDuplicate) "Дубликат ×${record.duplicateCount}" else "Уникальный", fontSize = 13.sp)
+                }
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Checkbox(
+                    checked = if (selectionMode) selected else record.status == RecordStatus.ARCHIVED,
+                    onCheckedChange = { if (selectionMode) onClick() else onScanned(it) }
+                )
+                Text(if (record.status == RecordStatus.ARCHIVED) "В архиве" else "В архив", fontSize = 10.sp)
+            }
         }
     }
 }
