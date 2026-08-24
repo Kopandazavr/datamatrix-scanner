@@ -130,7 +130,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -203,8 +202,8 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     }
     LaunchedEffect(mode, controller) {
         if (mode == AppMode.LIST && controller != null) {
-            // Give Preview/CameraX half a second to settle, then keep AF/AE/AWB
-            // centred on the visible cross without toggling the torch or EV.
+            // Focus is driven only by a cheap sharpness estimate around the cross.
+            // Candidate/decoded boxes are intentionally not part of this decision.
             delay(500)
             val point = SurfaceOrientedMeteringPointFactory(1f, 1f)
                 .createPoint(.5f, .5f, .16f)
@@ -212,11 +211,14 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
                 point,
                 FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
             )
-                .setAutoCancelDuration(1_500, TimeUnit.MILLISECONDS)
+                // Keep a successful focus instead of releasing it back to a blurry state.
+                .disableAutoCancel()
                 .build()
             while (true) {
-                runCatching { controller.cameraControl?.startFocusAndMetering(action) }
-                delay(2_000)
+                if (analyzer.needsCenterRefocus()) {
+                    runCatching { controller.cameraControl?.startFocusAndMetering(action) }
+                }
+                delay(1_000)
             }
         }
     }

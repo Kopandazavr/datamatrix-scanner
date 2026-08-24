@@ -47,6 +47,11 @@ class DataMatrixAnalyzer(
     @Volatile var fullScreen: Boolean = false
     @Volatile var enhancementMode: ScanEnhancementMode = ScanEnhancementMode.BALANCED
     private var lastAnalysisAt = 0L
+    private var lastSharpnessAt = 0L
+    private var smoothedCenterSharpness = 0f
+    private var centerSharp = false
+    private var hasCenterSharpnessSample = false
+    @Volatile private var centerRefocusNeeded = true
     private var frameNumber = 0L
     private val rescueProcessor = RescueDataMatrixProcessor(onDecoded, onPotentialBoxes)
     private val targetedCaptureRequested = AtomicBoolean(false)
@@ -86,6 +91,9 @@ class DataMatrixAnalyzer(
         targetedCaptureRequested.set(true)
     }
 
+    /** Independent of recognition and candidate boxes; read by the one-second focus loop. */
+    fun needsCenterRefocus(): Boolean = centerRefocusNeeded
+
     override fun analyze(image: ImageProxy) {
         val now = System.currentTimeMillis()
         val interval = if (fullScreen) 25L else 50L
@@ -97,6 +105,31 @@ class DataMatrixAnalyzer(
         try {
             val rotation = image.imageInfo.rotationDegrees
             val crop = image.cropRect
+            if (now - lastSharpnessAt >= 250L) {
+                lastSharpnessAt = now
+                image.planes.firstOrNull()?.let { plane ->
+                    estimateCenterSharpness(
+                        luma = plane.buffer,
+                        imageWidth = image.width,
+                        imageHeight = image.height,
+                        rowStride = plane.rowStride,
+                        pixelStride = plane.pixelStride,
+                        cropLeft = crop.left,
+                        cropTop = crop.top,
+                        cropRight = crop.right,
+                        cropBottom = crop.bottom
+                    )?.let { score ->
+                        smoothedCenterSharpness = if (hasCenterSharpnessSample) {
+                            smoothedCenterSharpness * .45f + score * .55f
+                        } else {
+                            score
+                        }
+                        hasCenterSharpnessSample = true
+                        centerSharp = updateCenterSharpState(centerSharp, smoothedCenterSharpness)
+                        centerRefocusNeeded = !centerSharp
+                    }
+                }
+            }
             val outputWidth = if (rotation == 90 || rotation == 270) crop.height() else crop.width()
             val outputHeight = if (rotation == 90 || rotation == 270) crop.width() else crop.height()
             frameNumber += 1
