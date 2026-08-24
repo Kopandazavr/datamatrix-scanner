@@ -38,10 +38,14 @@ jobs:
       - name: Prepare local signing tools fallback
         run: |
           mkdir -p /tmp/android-build-tools/lib
+          mkdir -p /tmp/android-build-tools/lib64
           cp "$ANDROID_HOME/build-tools/35.0.0/apksigner" /tmp/android-build-tools/
           cp "$ANDROID_HOME/build-tools/35.0.0/zipalign" /tmp/android-build-tools/
           cp "$ANDROID_HOME/build-tools/35.0.0/aapt2" /tmp/android-build-tools/
           cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" /tmp/android-build-tools/lib/
+          LIBCXX="$(find "$ANDROID_HOME/build-tools/35.0.0" -type f -name 'libc++.so' -print -quit)"
+          test -n "$LIBCXX"
+          cp "$LIBCXX" /tmp/android-build-tools/lib64/libc++.so
       - uses: gradle/actions/setup-gradle@v4
       - name: Build and test
         run: |
