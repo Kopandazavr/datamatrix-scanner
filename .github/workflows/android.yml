@@ -6,12 +6,22 @@ on:
 
 permissions:
   contents: write
+  statuses: write
 
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Publish bootstrap run locator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state=pending \
+            -f context=offline-bootstrap \
+            -f description="run ${GITHUB_RUN_ID}" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -24,36 +34,38 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew testDebugUnitTest assembleDebug --stacktrace
-      - name: Pack offline Gradle cache
+      - name: Pack offline toolchain
         run: |
-          rm -rf /tmp/offline-gradle
-          mkdir -p /tmp/offline-gradle
-          rsync -a --exclude='*.lock' --exclude='daemon/' "$HOME/.gradle/" /tmp/offline-gradle/
-      - name: Pack minimal Android SDK 35
-        run: |
-          rm -rf /tmp/offline-android
-          mkdir -p /tmp/offline-android/platforms /tmp/offline-android/build-tools
-          cp -a "$ANDROID_HOME/platforms/android-35" /tmp/offline-android/platforms/
-          cp -a "$ANDROID_HOME/build-tools/35.0.0" /tmp/offline-android/build-tools/
-          cp -a "$ANDROID_HOME/platform-tools" /tmp/offline-android/
-          if [ -d "$ANDROID_HOME/licenses" ]; then cp -a "$ANDROID_HOME/licenses" /tmp/offline-android/; fi
+          rm -f /tmp/datamatrix-offline-gradle.tar.gz /tmp/datamatrix-offline-android.tar.gz
+          tar --exclude='*.lock' --exclude='daemon' -czf /tmp/datamatrix-offline-gradle.tar.gz -C "$HOME" .gradle
+          tar -czf /tmp/datamatrix-offline-android.tar.gz \
+            -C "$ANDROID_HOME" platforms/android-35 build-tools/35.0.0 platform-tools licenses
       - uses: actions/upload-artifact@v4
         with:
           name: datamatrix-offline-gradle
-          path: /tmp/offline-gradle/
-          include-hidden-files: true
-          compression-level: 6
+          path: /tmp/datamatrix-offline-gradle.tar.gz
+          compression-level: 0
       - uses: actions/upload-artifact@v4
         with:
           name: datamatrix-offline-android-sdk
-          path: /tmp/offline-android/
-          include-hidden-files: true
-          compression-level: 6
+          path: /tmp/datamatrix-offline-android.tar.gz
+          compression-level: 0
       - name: Restore regular CI workflow
         run: |
-          git show HEAD^:.github/workflows/android.yml > .github/workflows/android.yml
+          git show 87353953e9401545c9291963225402f27d32a808:.github/workflows/android.yml > .github/workflows/android.yml
           git add .github/workflows/android.yml
           git config user.name "Kopandazavr"
           git config user.email "101416382+Kopandazavr@users.noreply.github.com"
           git commit -m "ci: restore Android build workflow"
           git push origin HEAD:main
+      - name: Mark bootstrap status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+        run: |
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="${CI_STATE}" \
+            -f context=offline-bootstrap \
+            -f description="run ${GITHUB_RUN_ID}" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
