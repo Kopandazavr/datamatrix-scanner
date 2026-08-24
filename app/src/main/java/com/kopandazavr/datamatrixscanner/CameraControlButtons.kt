@@ -40,7 +40,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val CameraControlBlue = Color(0xFF2563EB)
-private const val FocusProgressNominalMs = 1_800f
+private const val EnhancementScanIntervalMs = 650L
+private const val EnhancementHapticIntervalMs = 280L
 
 @Composable
 internal fun EnhancementHoldButton(
@@ -59,17 +60,24 @@ internal fun EnhancementHoldButton(
                     onActiveChange(true)
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     coroutineScope {
-                        val pulseJob = launch {
+                        val scanJob = launch {
                             while (true) {
                                 onPulse()
-                                delay(650L)
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                delay(EnhancementScanIntervalMs)
+                            }
+                        }
+                        val hapticJob = launch {
+                            delay(EnhancementHapticIntervalMs)
+                            while (true) {
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                delay(EnhancementHapticIntervalMs)
                             }
                         }
                         try {
                             tryAwaitRelease()
                         } finally {
-                            pulseJob.cancel()
+                            scanJob.cancel()
+                            hapticJob.cancel()
                             onActiveChange(false)
                         }
                     }
@@ -100,6 +108,7 @@ internal fun FocusModeButton(
     fullscreen: Boolean,
     autoEnabled: Boolean,
     busy: Boolean,
+    nominalProgressMs: Float,
     onTap: () -> Unit,
     onLongPress: () -> Unit
 ) {
@@ -114,12 +123,13 @@ internal fun FocusModeButton(
 
     // The clock is visual guidance, but unlock is tied to the real CameraX busy
     // state. Long focus sessions stop at 94% and only reach 100% when AF finishes.
-    LaunchedEffect(busy) {
+    LaunchedEffect(busy, nominalProgressMs) {
         if (busy) {
             progress = 0f
             val startedAt = SystemClock.elapsedRealtime()
+            val nominal = nominalProgressMs.coerceAtLeast(250f)
             while (true) {
-                progress = ((SystemClock.elapsedRealtime() - startedAt) / FocusProgressNominalMs)
+                progress = ((SystemClock.elapsedRealtime() - startedAt) / nominal)
                     .coerceIn(0f, .94f)
                 delay(16L)
             }

@@ -100,10 +100,12 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
@@ -130,6 +132,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -259,8 +262,12 @@ private fun ListScreen(
     val count by vm.setCount.collectAsState()
     val currentBatchId by vm.batchId.collectAsState()
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
     var enhancementDialog by remember { mutableStateOf(false) }
+    var focusModeDialog by remember { mutableStateOf(false) }
+    var photoFlash by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
@@ -301,6 +308,10 @@ private fun ListScreen(
                                             text = { Text("Усиление: ${enhancementMode.title}") },
                                             onClick = { menu = false; enhancementDialog = true }
                                         )
+                                        DropdownMenuItem(
+                                            text = { Text("Ручной фокус: ${focusController.manualMode.title}") },
+                                            onClick = { menu = false; focusModeDialog = true }
+                                        )
                                     }
                                 }
                             }
@@ -317,6 +328,9 @@ private fun ListScreen(
                             allSelected = orderedIds.isNotEmpty() && orderedIds.all { it in selection.selected },
                             onToggleAll = { selection = selection.toggleAll(orderedIds) },
                             onMove = { target ->
+                                if (target == RecordStatus.ARCHIVED) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
                                 vm.move(selection.selected, target)
                                 selection = RangeSelectionState()
                             }
@@ -373,6 +387,12 @@ private fun ListScreen(
                 if (activeController == null) {
                     Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
                 } else {
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    photoFlash = true
+                    scope.launch {
+                        delay(90L)
+                        photoFlash = false
+                    }
                     saveCameraPhoto(context, activeController) { result ->
                         Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
                     }
@@ -383,6 +403,9 @@ private fun ListScreen(
             recognizedCount = count,
             onNextBatch = vm::nextBatch
         )
+        if (photoFlash) {
+            Box(Modifier.fillMaxSize().background(Color.White))
+        }
     }
 
     eventRecord?.let { record ->
@@ -408,6 +431,17 @@ private fun ListScreen(
                 enhancementDialog = false
             },
             onDismiss = { enhancementDialog = false }
+        )
+    }
+
+    if (focusModeDialog) {
+        ManualFocusModeDialog(
+            selected = focusController.manualMode,
+            onSelect = {
+                focusController.onManualModeChange(it)
+                focusModeDialog = false
+            },
+            onDismiss = { focusModeDialog = false }
         )
     }
 }
@@ -439,6 +473,48 @@ private fun EnhancementModeDialog(
                             Text(mode.title, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
                             if (mode != ScanEnhancementMode.OFF) {
                                 Text("${mode.decoderAttemptCount} попыток", color = Color.Gray)
+                            }
+                            if (selected == mode) Icon(Icons.Default.Check, null, tint = Color(0xFF2563EB))
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } }
+    )
+}
+
+@Composable
+private fun ManualFocusModeDialog(
+    selected: ManualFocusMode,
+    onSelect: (ManualFocusMode) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ручной фокус") },
+        text = {
+            Column {
+                Text("Быстрый делает один аппаратный AF без дополнительной паузы. Точный после первого AF проверяет резкость в центре и при необходимости делает второй проход.")
+                Spacer(Modifier.height(10.dp))
+                ManualFocusMode.entries.forEach { mode ->
+                    Surface(
+                        onClick = { onSelect(mode) },
+                        color = if (selected == mode) Color(0xFFDDEAFE) else Color.Transparent,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(mode.title, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    if (mode == ManualFocusMode.FAST) "Ориентир: около 0,5 с, зависит от камеры" else "Приоритет максимальной устойчивости фокуса",
+                                    color = Color.Gray,
+                                    fontSize = 12.sp
+                                )
                             }
                             if (selected == mode) Icon(Icons.Default.Check, null, tint = Color(0xFF2563EB))
                         }
@@ -564,6 +640,7 @@ private fun CameraPreview(
                         fullscreen = true,
                         autoEnabled = focus.autoEnabled,
                         busy = focus.busy,
+                        nominalProgressMs = focus.nominalProgressMs,
                         onTap = focus.onTap,
                         onLongPress = focus.onLongPress
                     )
@@ -615,6 +692,7 @@ private fun CameraPreview(
                         fullscreen = false,
                         autoEnabled = focus.autoEnabled,
                         busy = focus.busy,
+                        nominalProgressMs = focus.nominalProgressMs,
                         onTap = focus.onTap,
                         onLongPress = focus.onLongPress
                     )
@@ -655,11 +733,20 @@ private fun RecordRow(
     onStatus: () -> Unit,
     onScanned: (Boolean) -> Unit
 ) {
+    val haptic = LocalHapticFeedback.current
     val platformConfiguration = LocalViewConfiguration.current
     val halfSecondLongPress = remember(platformConfiguration) {
         object : ViewConfiguration by platformConfiguration {
             override val longPressTimeoutMillis: Long = 500L
         }
+    }
+    val selectionTap = {
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        onClick()
+    }
+    val selectionLong = {
+        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+        onLongClick()
     }
 
     CompositionLocalProvider(LocalViewConfiguration provides halfSecondLongPress) {
@@ -684,16 +771,16 @@ private fun RecordRow(
                 Modifier
                     .fillMaxSize()
                     .combinedClickable(
-                        onClick = { if (selectionMode) onClick() },
-                        onLongClick = onLongClick
+                        onClick = { if (selectionMode) selectionTap() },
+                        onLongClick = selectionLong
                     )
                     .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column(
                     Modifier.combinedClickable(
-                        onClick = { if (selectionMode) onClick() else onMatrix() },
-                        onLongClick = onLongClick
+                        onClick = { if (selectionMode) selectionTap() else onMatrix() },
+                        onLongClick = selectionLong
                     ),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
@@ -713,11 +800,18 @@ private fun RecordRow(
                     StatusTag(
                         duplicate = record.isDuplicate,
                         duplicateCount = record.duplicateCount,
-                        onClick = { if (selectionMode) onClick() else onStatus() }
+                        onClick = { if (selectionMode) selectionTap() else onStatus() }
                     )
                 }
                 Button(
-                    onClick = { if (selectionMode) onClick() else onScanned(true) },
+                    onClick = {
+                        if (selectionMode) {
+                            selectionTap()
+                        } else {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            onScanned(true)
+                        }
+                    },
                     enabled = selectionMode || record.status != RecordStatus.ARCHIVED,
                     modifier = Modifier.width(72.dp).fillMaxHeight(),
                     shape = RoundedCornerShape(14.dp),
@@ -1062,6 +1156,7 @@ private fun RecoveryCandidateRow(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> Unit) {
+    val haptic = LocalHapticFeedback.current
     var viewerIds by remember(initial.ids) { mutableStateOf(initial.ids) }
     val initialPage = initial.index.coerceIn(0, initial.ids.lastIndex.coerceAtLeast(0))
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { viewerIds.size })
@@ -1111,6 +1206,9 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
             Button(
                 onClick = {
                     current?.let { record ->
+                        if (initial.source != RecordStatus.ARCHIVED) {
+                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        }
                         if (!record.isScanned) {
                             vm.setScanned(record.id, true) { }
                         }

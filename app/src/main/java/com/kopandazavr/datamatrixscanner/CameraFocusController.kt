@@ -8,6 +8,7 @@ import androidx.camera.view.LifecycleCameraController
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -23,11 +24,20 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 internal data class CameraFocusController(
     val autoEnabled: Boolean,
     val busy: Boolean,
+    val manualMode: ManualFocusMode,
+    val nominalProgressMs: Float,
     val onTap: () -> Unit,
-    val onLongPress: () -> Unit
+    val onLongPress: () -> Unit,
+    val onManualModeChange: (ManualFocusMode) -> Unit
 )
 
-private enum class FocusRequest { MANUAL, AUTO }
+private data class FocusRequest(
+    val automatic: Boolean,
+    val mode: ManualFocusMode
+)
+
+private const val FocusPreferencesName = "camera_focus_preferences"
+private const val ManualFocusModePreference = "manual_focus_mode"
 
 @Composable
 internal fun rememberCameraFocusController(
@@ -36,18 +46,28 @@ internal fun rememberCameraFocusController(
     analyzer: DataMatrixAnalyzer
 ): CameraFocusController {
     val context = LocalContext.current
+    val preferences = remember(context) {
+        context.getSharedPreferences(FocusPreferencesName, Context.MODE_PRIVATE)
+    }
     val requests = remember { Channel<FocusRequest>(capacity = Channel.CONFLATED) }
     val autoGate = remember { AutoFocusGate() }
     var autoEnabled by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var manualMode by remember {
+        mutableStateOf(
+            ManualFocusMode.fromPreference(preferences.getString(ManualFocusModePreference, null))
+        )
+    }
+    var nominalProgressMs by remember { mutableFloatStateOf(manualMode.nominalProgressMs) }
 
     LaunchedEffect(active, controller) {
         if (!active || controller == null) return@LaunchedEffect
         for (request in requests) {
+            nominalProgressMs = request.mode.nominalProgressMs
             busy = true
             try {
-                runCenterFocusSession(context, controller, analyzer)
-                if (request == FocusRequest.AUTO) {
+                runCenterFocusSession(context, controller, analyzer, request.mode)
+                if (request.automatic) {
                     autoGate.markSessionFinished(SystemClock.elapsedRealtime())
                 }
             } finally {
@@ -64,14 +84,15 @@ internal fun rememberCameraFocusController(
         autoGate.reset()
         if (!active || controller == null || !autoEnabled) return@LaunchedEffect
 
-        // Switching auto mode on establishes a fresh, known focus point immediately.
+        // Auto mode deliberately keeps the existing quality-first two-pass session.
+        // The user's Fast/Precise choice applies only to explicit manual taps.
         autoGate.markSessionStarted(SystemClock.elapsedRealtime())
-        requests.trySend(FocusRequest.AUTO)
+        requests.trySend(FocusRequest(automatic = true, mode = ManualFocusMode.PRECISE))
 
         while (true) {
             val now = SystemClock.elapsedRealtime()
             if (!busy && autoGate.shouldRequest(analyzer.needsCenterRefocus(), now)) {
-                requests.trySend(FocusRequest.AUTO)
+                requests.trySend(FocusRequest(automatic = true, mode = ManualFocusMode.PRECISE))
             }
             delay(150L)
         }
@@ -80,40 +101,48 @@ internal fun rememberCameraFocusController(
     return CameraFocusController(
         autoEnabled = autoEnabled,
         busy = busy,
+        manualMode = manualMode,
+        nominalProgressMs = nominalProgressMs,
         onTap = {
-            // A normal tap always means one finite focus session. If auto mode was
-            // active, the same tap also disables it exactly as the UI indicates.
+            // A normal tap always means one finite manual focus session. If auto mode
+            // was active, the same tap also disables it exactly as the UI indicates.
             if (autoEnabled) autoEnabled = false
-            requests.trySend(FocusRequest.MANUAL)
+            requests.trySend(FocusRequest(automatic = false, mode = manualMode))
         },
         onLongPress = {
             if (!autoEnabled) autoEnabled = true
+        },
+        onManualModeChange = { mode ->
+            manualMode = mode
+            if (!busy) nominalProgressMs = mode.nominalProgressMs
+            preferences.edit().putString(ManualFocusModePreference, mode.name).apply()
         }
     )
 }
 
 /**
- * One user-visible focus session. CameraX gets at most two AF attempts. Between
- * them the analyzer has time to resample its existing centre-weighted sharpness
- * metric (inner pixels around the cross count more than outer pixels). Even if
- * the signal remains pessimistic after the second attempt, the session stops.
+ * One finite focus session. FAST asks CameraX for a single central AF result and
+ * adds no artificial wait, so its duration is almost entirely the device's own AF
+ * time. PRECISE preserves the quality-first two-pass behaviour: after the first AF
+ * it waits for a fresh centre-sharpness sample and performs a second AF only when
+ * the first result still looks insufficient. Auto mode always uses PRECISE.
  */
 private suspend fun runCenterFocusSession(
     context: Context,
     controller: LifecycleCameraController,
-    analyzer: DataMatrixAnalyzer
+    analyzer: DataMatrixAnalyzer,
+    mode: ManualFocusMode
 ): Boolean {
     var anySuccess = false
-    repeat(2) { attempt ->
+    repeat(mode.maxAttempts) { attempt ->
         analyzer.onCenterFocusStarted()
         val success = performCenterFocusAttempt(context, controller)
         analyzer.onCenterFocusCompleted(success)
         anySuccess = anySuccess || success
 
-        if (attempt == 0) {
-            // The analyzer samples focus every 250 ms. Give it one new stable
-            // sample before deciding whether a second AF attempt is worthwhile.
-            delay(450L)
+        val hasAnotherAttempt = attempt + 1 < mode.maxAttempts
+        if (hasAnotherAttempt) {
+            delay(mode.settleDelayMs)
             if (success && !analyzer.needsCenterRefocus()) return true
         }
     }
