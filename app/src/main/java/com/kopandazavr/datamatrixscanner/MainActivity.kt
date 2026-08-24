@@ -204,8 +204,8 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     }
     LaunchedEffect(mode, controller) {
         if (mode == AppMode.LIST && controller != null) {
-            // Focus is driven only by a cheap sharpness estimate around the cross.
-            // Candidate/decoded boxes are intentionally not part of this decision.
+            // Focus uses sharpness, centre motion and CameraX's own AF result.
+            // Candidate/decoded boxes are intentionally not part of the decision.
             delay(150)
             val point = SurfaceOrientedMeteringPointFactory(1f, 1f)
                 .createPoint(.5f, .5f, .10f)
@@ -218,10 +218,11 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
                 .build()
             var focusInFlight = false
             var lastFocusRequestAt = 0L
+            var initialFocusPending = true
             while (true) {
                 val now = SystemClock.elapsedRealtime()
                 if (
-                    analyzer.needsCenterRefocus() &&
+                    (initialFocusPending || analyzer.needsCenterRefocus()) &&
                     !focusInFlight &&
                     now - lastFocusRequestAt >= 800L
                 ) {
@@ -229,11 +230,16 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
                         controller.cameraControl?.startFocusAndMetering(action)
                     }.getOrNull()
                     if (future != null) {
+                        initialFocusPending = false
                         focusInFlight = true
                         lastFocusRequestAt = now
+                        analyzer.onCenterFocusStarted()
                         future.addListener(
                             {
-                                runCatching { future.get() }
+                                val focusSucceeded = runCatching {
+                                    future.get().isFocusSuccessful
+                                }.getOrDefault(false)
+                                analyzer.onCenterFocusCompleted(focusSucceeded)
                                 focusInFlight = false
                             },
                             ContextCompat.getMainExecutor(context)

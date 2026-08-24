@@ -49,9 +49,13 @@ class DataMatrixAnalyzer(
     private var lastAnalysisAt = 0L
     private var lastSharpnessAt = 0L
     private var smoothedCenterSharpness = 0f
+    private var bestCenterSharpness = 0f
     private var centerSharp = false
     private var hasCenterSharpnessSample = false
-    @Volatile private var centerRefocusNeeded = true
+    @Volatile private var motionReference: ByteArray? = null
+    @Volatile private var motionRefocusNeeded = false
+    @Volatile private var focusFailureRefocusNeeded = false
+    @Volatile private var ignoreMotionUntil = 0L
     private var frameNumber = 0L
     private val rescueProcessor = RescueDataMatrixProcessor(onDecoded, onPotentialBoxes)
     private val targetedCaptureRequested = AtomicBoolean(false)
@@ -91,8 +95,21 @@ class DataMatrixAnalyzer(
         targetedCaptureRequested.set(true)
     }
 
-    /** Independent of recognition and candidate boxes; read by the one-second focus loop. */
-    fun needsCenterRefocus(): Boolean = centerRefocusNeeded
+    /** Independent of recognition and candidate boxes; read by the focus loop. */
+    fun needsCenterRefocus(): Boolean = !centerSharp || motionRefocusNeeded || focusFailureRefocusNeeded
+
+    fun onCenterFocusStarted() {
+        motionRefocusNeeded = false
+        focusFailureRefocusNeeded = false
+        motionReference = null
+        ignoreMotionUntil = System.currentTimeMillis() + 750L
+    }
+
+    fun onCenterFocusCompleted(success: Boolean) {
+        focusFailureRefocusNeeded = !success
+        motionReference = null
+        ignoreMotionUntil = System.currentTimeMillis() + 350L
+    }
 
     override fun analyze(image: ImageProxy) {
         val now = System.currentTimeMillis()
@@ -108,6 +125,33 @@ class DataMatrixAnalyzer(
             if (now - lastSharpnessAt >= 250L) {
                 lastSharpnessAt = now
                 image.planes.firstOrNull()?.let { plane ->
+                    sampleCenterLuma(
+                        luma = plane.buffer,
+                        imageWidth = image.width,
+                        imageHeight = image.height,
+                        rowStride = plane.rowStride,
+                        pixelStride = plane.pixelStride,
+                        cropLeft = crop.left,
+                        cropTop = crop.top,
+                        cropRight = crop.right,
+                        cropBottom = crop.bottom
+                    )?.let { sample ->
+                        if (now < ignoreMotionUntil) {
+                            motionReference = sample
+                        } else {
+                            val reference = motionReference
+                            if (
+                                reference != null &&
+                                estimateCenterChange(reference, sample)?.let {
+                                    it >= CENTER_CHANGE_THRESHOLD
+                                } == true
+                            ) {
+                                motionRefocusNeeded = true
+                            } else if (reference == null) {
+                                motionReference = sample
+                            }
+                        }
+                    }
                     estimateCenterSharpness(
                         luma = plane.buffer,
                         imageWidth = image.width,
@@ -125,8 +169,22 @@ class DataMatrixAnalyzer(
                             score
                         }
                         hasCenterSharpnessSample = true
-                        centerSharp = updateCenterSharpState(centerSharp, smoothedCenterSharpness)
-                        centerRefocusNeeded = !centerSharp
+                        bestCenterSharpness = maxOf(
+                            smoothedCenterSharpness,
+                            bestCenterSharpness * .995f
+                        )
+                        centerSharp = updateCenterSharpState(
+                            wasSharp = centerSharp,
+                            score = smoothedCenterSharpness,
+                            sharpThreshold = maxOf(
+                                CENTER_SHARP_THRESHOLD,
+                                bestCenterSharpness * .72f
+                            ),
+                            blurThreshold = maxOf(
+                                CENTER_BLUR_THRESHOLD,
+                                bestCenterSharpness * .55f
+                            )
+                        )
                     }
                 }
             }

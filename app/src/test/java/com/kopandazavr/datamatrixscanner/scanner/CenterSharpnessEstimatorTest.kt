@@ -68,4 +68,30 @@ class CenterSharpnessEstimatorTest {
         assertNotNull(edgeScore)
         assertTrue(requireNotNull(centreScore) > requireNotNull(edgeScore))
     }
+
+    @Test
+    fun centreChangeIgnoresUniformExposureShift() {
+        val previous = ByteArray(144) { index -> (40 + index % 20).toByte() }
+        val current = ByteArray(144) { index -> (60 + index % 20).toByte() }
+
+        val change = estimateCenterChange(previous, current)
+
+        assertNotNull(change)
+        assertTrue(requireNotNull(change) < CENTER_CHANGE_THRESHOLD)
+    }
+
+    @Test
+    fun centreChangeDetectsObjectMovement() {
+        val previous = ByteArray(144) { index ->
+            if ((index / 12) % 2 == 0) 30.toByte() else 220.toByte()
+        }
+        val current = ByteArray(144) { index ->
+            if ((index / 12 + index % 12) % 2 == 0) 30.toByte() else 220.toByte()
+        }
+
+        val change = estimateCenterChange(previous, current)
+
+        assertNotNull(change)
+        assertTrue(requireNotNull(change) >= CENTER_CHANGE_THRESHOLD)
+    }
 }
