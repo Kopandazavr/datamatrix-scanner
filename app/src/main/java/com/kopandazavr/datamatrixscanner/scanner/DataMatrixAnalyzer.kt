@@ -55,6 +55,7 @@ class DataMatrixAnalyzer(
     @Volatile private var motionReference: ByteArray? = null
     @Volatile private var motionRefocusNeeded = false
     @Volatile private var focusFailureRefocusNeeded = false
+    @Volatile private var explicitRefocusNeeded = true
     @Volatile private var ignoreMotionUntil = 0L
     private var frameNumber = 0L
     private val rescueProcessor = RescueDataMatrixProcessor(onDecoded, onPotentialBoxes)
@@ -96,11 +97,17 @@ class DataMatrixAnalyzer(
     }
 
     /** Independent of recognition and candidate boxes; read by the focus loop. */
-    fun needsCenterRefocus(): Boolean = !centerSharp || motionRefocusNeeded || focusFailureRefocusNeeded
+    fun needsCenterRefocus(): Boolean =
+        !centerSharp || motionRefocusNeeded || focusFailureRefocusNeeded || explicitRefocusNeeded
+
+    fun requestCenterRefocus() {
+        explicitRefocusNeeded = true
+    }
 
     fun onCenterFocusStarted() {
         motionRefocusNeeded = false
         focusFailureRefocusNeeded = false
+        explicitRefocusNeeded = false
         motionReference = null
         ignoreMotionUntil = System.currentTimeMillis() + 750L
     }

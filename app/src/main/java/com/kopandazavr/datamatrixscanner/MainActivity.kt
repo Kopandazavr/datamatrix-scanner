@@ -97,6 +97,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
@@ -201,6 +202,9 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
         } else {
             controller?.clearImageAnalysisAnalyzer()
         }
+    }
+    LaunchedEffect(mode, controller, cameraFullscreen) {
+        if (mode == AppMode.LIST && controller != null) analyzer.requestCenterRefocus()
     }
     LaunchedEffect(mode, controller) {
         if (mode == AppMode.LIST && controller != null) {
@@ -550,9 +554,11 @@ private fun CameraPreview(
                 } },
                 update = { it.controller = controller },
                 modifier = Modifier
+                    .align(Alignment.Center)
                     .fillMaxWidth()
                     .requiredHeight(EmbeddedCameraPreviewHeight)
                     .graphicsLayer {
+                        transformOrigin = TransformOrigin.Center
                         scaleX = fullscreenScale
                         scaleY = fullscreenScale
                     }

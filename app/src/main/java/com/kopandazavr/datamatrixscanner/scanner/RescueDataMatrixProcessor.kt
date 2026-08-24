@@ -77,7 +77,11 @@ internal class RescueDataMatrixProcessor(
                                 )
                             }
                             regions.forEach { region ->
-                                val padded = region.paddedSquare(variant.bitmap.width, variant.bitmap.height, .24f)
+                                val padded = region.paddedSquare(
+                                    variant.bitmap.width,
+                                    variant.bitmap.height,
+                                    CANDIDATE_CROP_PADDING
+                                )
                                 val crop = cropBitmap(variant.bitmap, padded) ?: return@forEach
                                 try {
                                     addAll(

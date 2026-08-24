@@ -107,7 +107,11 @@ class PhotoRecoveryDecoder : AutoCloseable {
         region: RecoveryRegion,
         found: LinkedHashMap<String, DecodedDataMatrix>
     ) {
-        val cropRegion = region.paddedSquare(original.width, original.height, .24f)
+        val cropRegion = region.paddedSquare(
+            original.width,
+            original.height,
+            CANDIDATE_CROP_PADDING
+        )
         val candidate = crop(original, cropRegion) ?: return
         try {
             val bases = buildList {

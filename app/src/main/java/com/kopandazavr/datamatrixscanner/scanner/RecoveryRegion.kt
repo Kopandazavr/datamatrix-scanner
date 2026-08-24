@@ -3,6 +3,8 @@ package com.kopandazavr.datamatrixscanner.scanner
 import kotlin.math.max
 import kotlin.math.min
 
+internal const val CANDIDATE_CROP_PADDING = .40f
+
 internal data class PixelPoint(val x: Float, val y: Float)
 
 internal data class RecoveryRegion(

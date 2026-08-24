@@ -17,6 +17,17 @@ class RecoveryRegionTest {
     }
 
     @Test
+    fun candidateCropKeepsCentreAndAddsWideMargin() {
+        val region = RecoveryRegion(30f, 30f, 70f, 50f)
+        val padded = region.paddedSquare(100, 100, CANDIDATE_CROP_PADDING)
+
+        assertEquals(region.centerX, padded.centerX, .001f)
+        assertEquals(region.centerY, padded.centerY, .001f)
+        assertEquals(72f, padded.width, .001f)
+        assertEquals(72f, padded.height, .001f)
+    }
+
+    @Test
     fun mergeRemovesOnlyNearDuplicateRegions() {
         val regions = mergeRecoveryRegions(
             listOf(
