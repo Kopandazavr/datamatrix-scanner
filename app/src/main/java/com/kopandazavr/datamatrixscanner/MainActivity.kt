@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Bundle
-import android.os.SystemClock
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -12,10 +11,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
-import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
@@ -24,6 +21,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -55,7 +53,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
@@ -133,7 +130,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -203,57 +199,11 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             controller?.clearImageAnalysisAnalyzer()
         }
     }
-    LaunchedEffect(mode, controller, cameraFullscreen) {
-        if (mode == AppMode.LIST && controller != null) analyzer.requestCenterRefocus()
-    }
-    LaunchedEffect(mode, controller) {
-        if (mode == AppMode.LIST && controller != null) {
-            // Focus uses sharpness, centre motion and CameraX's own AF result.
-            // Candidate/decoded boxes are intentionally not part of the decision.
-            delay(150)
-            val point = SurfaceOrientedMeteringPointFactory(1f, 1f)
-                .createPoint(.5f, .5f, .10f)
-            val action = FocusMeteringAction.Builder(
-                point,
-                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
-            )
-                // Keep a successful focus instead of releasing it back to a blurry state.
-                .disableAutoCancel()
-                .build()
-            var focusInFlight = false
-            var lastFocusRequestAt = 0L
-            var initialFocusPending = true
-            while (true) {
-                val now = SystemClock.elapsedRealtime()
-                if (
-                    (initialFocusPending || analyzer.needsCenterRefocus()) &&
-                    !focusInFlight &&
-                    now - lastFocusRequestAt >= 800L
-                ) {
-                    val future = runCatching {
-                        controller.cameraControl?.startFocusAndMetering(action)
-                    }.getOrNull()
-                    if (future != null) {
-                        initialFocusPending = false
-                        focusInFlight = true
-                        lastFocusRequestAt = now
-                        analyzer.onCenterFocusStarted()
-                        future.addListener(
-                            {
-                                val focusSucceeded = runCatching {
-                                    future.get().isFocusSuccessful
-                                }.getOrDefault(false)
-                                analyzer.onCenterFocusCompleted(focusSucceeded)
-                                focusInFlight = false
-                            },
-                            ContextCompat.getMainExecutor(context)
-                        )
-                    }
-                }
-                delay(200)
-            }
-        }
-    }
+    val focusController = rememberCameraFocusController(
+        active = mode == AppMode.LIST,
+        controller = controller,
+        analyzer = analyzer
+    )
 
     when (mode) {
         AppMode.LIST -> ListScreen(
@@ -262,6 +212,7 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             permissionGranted = permissionGranted,
             fullscreen = cameraFullscreen,
             enhancementMode = enhancementMode,
+            focusController = focusController,
             onToggleFullscreen = { cameraFullscreen = !cameraFullscreen },
             onRecovery = {
                 cameraFullscreen = false
@@ -295,6 +246,7 @@ private fun ListScreen(
     permissionGranted: Boolean,
     fullscreen: Boolean,
     enhancementMode: ScanEnhancementMode,
+    focusController: CameraFocusController,
     onToggleFullscreen: () -> Unit,
     onRecovery: () -> Unit,
     onTargetedRescue: () -> Unit,
@@ -427,6 +379,7 @@ private fun ListScreen(
                 }
             },
             onTargetedRescue = onTargetedRescue,
+            focusController = focusController,
             recognizedCount = count,
             onNextBatch = vm::nextBatch
         )
@@ -470,7 +423,7 @@ private fun EnhancementModeDialog(
         title = { Text("Усиление распознавания") },
         text = {
             Column {
-                Text("Оба движка сканируют весь видимый кадр. Кнопка с прицелом запускает максимальный проход для точно наведённого кадра.")
+                Text("Оба движка сканируют весь видимый кадр. Кнопка со спидометром запускает усиленный проход; её можно удерживать для повторных проходов.")
                 Spacer(Modifier.height(10.dp))
                 ScanEnhancementMode.entries.forEach { mode ->
                     Surface(
@@ -532,10 +485,18 @@ private fun CameraPreview(
     onBack: () -> Unit,
     onPhoto: (() -> Unit)? = null,
     onTargetedRescue: (() -> Unit)? = null,
+    focusController: CameraFocusController? = null,
     recognizedCount: Int? = null,
     onNextBatch: (() -> Unit)? = null
 ) {
-    BoxWithConstraints(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
+    var enhancementActive by remember { mutableStateOf(false) }
+    val cameraFrameModifier = modifier
+        .clipToBounds()
+        .background(Color.Black)
+        .then(
+            if (enhancementActive) Modifier.border(3.dp, Color(0xFF3B82F6)) else Modifier
+        )
+    BoxWithConstraints(cameraFrameModifier, contentAlignment = Alignment.Center) {
         if (controller != null) {
             // Keep the camera surface at one stable measured size. Resizing PreviewView
             // makes CameraX renegotiate the surface and produces a visible black flash.
@@ -565,7 +526,7 @@ private fun CameraPreview(
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
-        CameraAimOverlay()
+        CameraAimOverlay(active = enhancementActive)
         Box(Modifier.fillMaxSize().clickable(onClick = onClick))
         if (fullscreen) {
             Row(
@@ -591,9 +552,22 @@ private fun CameraPreview(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 onTargetedRescue?.let { action ->
-                    FullscreenCameraButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр")
+                    EnhancementHoldButton(
+                        fullscreen = true,
+                        onPulse = action,
+                        onActiveChange = { enhancementActive = it }
+                    )
                 }
                 onPhoto?.let { action -> FullscreenCameraButton(action, Icons.Default.CameraAlt, "Сделать фото") }
+                focusController?.let { focus ->
+                    FocusModeButton(
+                        fullscreen = true,
+                        autoEnabled = focus.autoEnabled,
+                        busy = focus.busy,
+                        onTap = focus.onTap,
+                        onLongPress = focus.onLongPress
+                    )
+                }
             }
         } else if (recognizedCount != null) {
             Surface(
@@ -623,15 +597,28 @@ private fun CameraPreview(
                 }
             }
         }
-        if (!fullscreen && (onTargetedRescue != null || onPhoto != null)) {
+        if (!fullscreen && (onTargetedRescue != null || onPhoto != null || focusController != null)) {
             Row(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 onTargetedRescue?.let { action ->
-                    CameraOverlayButton(action, Icons.Default.CenterFocusStrong, "Усилить точный кадр")
+                    EnhancementHoldButton(
+                        fullscreen = false,
+                        onPulse = action,
+                        onActiveChange = { enhancementActive = it }
+                    )
                 }
                 onPhoto?.let { action -> CameraOverlayButton(action, Icons.Default.CameraAlt, "Сделать фото") }
+                focusController?.let { focus ->
+                    FocusModeButton(
+                        fullscreen = false,
+                        autoEnabled = focus.autoEnabled,
+                        busy = focus.busy,
+                        onTap = focus.onTap,
+                        onLongPress = focus.onLongPress
+                    )
+                }
             }
         }
     }
@@ -892,14 +879,15 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
 }
 
 @Composable
-private fun CameraAimOverlay() {
+private fun CameraAimOverlay(active: Boolean = false) {
     Canvas(Modifier.fillMaxSize()) {
         val center = Offset(size.width / 2f, size.height / 2f)
         val arm = 14.dp.toPx()
+        val foreground = if (active) Color(0xFF3B82F6) else Color.White
         drawLine(Color.Black.copy(alpha = .5f), Offset(center.x - arm, center.y), Offset(center.x + arm, center.y), 3.dp.toPx(), StrokeCap.Round)
         drawLine(Color.Black.copy(alpha = .5f), Offset(center.x, center.y - arm), Offset(center.x, center.y + arm), 3.dp.toPx(), StrokeCap.Round)
-        drawLine(Color.White, Offset(center.x - arm, center.y), Offset(center.x + arm, center.y), 1.dp.toPx(), StrokeCap.Round)
-        drawLine(Color.White, Offset(center.x, center.y - arm), Offset(center.x, center.y + arm), 1.dp.toPx(), StrokeCap.Round)
+        drawLine(foreground, Offset(center.x - arm, center.y), Offset(center.x + arm, center.y), 1.4.dp.toPx(), StrokeCap.Round)
+        drawLine(foreground, Offset(center.x, center.y - arm), Offset(center.x, center.y + arm), 1.4.dp.toPx(), StrokeCap.Round)
     }
 }
 
