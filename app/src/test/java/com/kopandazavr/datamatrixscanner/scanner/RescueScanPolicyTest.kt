@@ -13,11 +13,11 @@ class RescueScanPolicyTest {
     }
 
     @Test
-    fun `rescue restarts immediately when workers are free and never overlaps`() {
+    fun `heavy rescue never auto starts in live scanning`() {
         assertFalse(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.OFF))
-        assertFalse(RescueScanPolicy.shouldStart(true, ScanEnhancementMode.BALANCED))
-        assertTrue(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.BALANCED))
-        assertTrue(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.AGGRESSIVE))
+        assertFalse(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.BALANCED))
+        assertFalse(RescueScanPolicy.shouldStart(false, ScanEnhancementMode.AGGRESSIVE))
+        assertFalse(RescueScanPolicy.shouldStart(true, ScanEnhancementMode.AGGRESSIVE))
     }
 
     @Test

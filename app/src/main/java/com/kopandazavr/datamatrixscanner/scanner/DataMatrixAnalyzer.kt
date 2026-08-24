@@ -59,6 +59,7 @@ class DataMatrixAnalyzer(
     @Volatile private var ignoreMotionUntil = 0L
     private var frameNumber = 0L
     private val rescueProcessor = RescueDataMatrixProcessor(onDecoded, onPotentialBoxes)
+    private val liveCandidateProcessor = LiveCandidateProcessor(onDecoded, onPotentialBoxes)
     private val targetedCaptureRequested = AtomicBoolean(false)
     private val pendingTargetedFrame = AtomicReference<Bitmap?>(null)
     private val capturedKeys = object : LinkedHashMap<String, Unit>(512, .75f, true) {
@@ -225,6 +226,11 @@ class DataMatrixAnalyzer(
                             region.toPotentialDetectionBox(outputWidth, outputHeight, "live:$index")
                         }
                     )
+                    // White boxes are actionable, not decorative: isolate them from
+                    // this exact frame and send them to the independent live ML Kit path.
+                    captureVisibleBitmap(image)?.let { snapshot ->
+                        liveCandidateProcessor.submit(snapshot, potentialRegions)
+                    }
                 }
             }
             val decoded = results.mapNotNull { result ->
@@ -249,9 +255,7 @@ class DataMatrixAnalyzer(
                     )
                 )
             }.distinctBy { it.rawBytes.contentHashCode() }
-            if (decoded.isEmpty()) {
-                onDecoded(emptyList())
-            } else {
+            if (decoded.isNotEmpty()) {
                 val uncapturedKeys = decoded.mapNotNull { item ->
                     Base64.encodeToString(item.rawBytes, Base64.NO_WRAP).takeIf { it !in capturedKeys }
                 }.toSet()
@@ -293,6 +297,7 @@ class DataMatrixAnalyzer(
 
     override fun close() {
         pendingTargetedFrame.getAndSet(null)?.recycle()
+        liveCandidateProcessor.close()
         rescueProcessor.close()
     }
 }

@@ -16,9 +16,14 @@ enum class ScanEnhancementMode(
     }
 }
 
+/**
+ * Heavy rescue must never run continuously in the live loop. Normal scanning now
+ * has its own fast full-frame + candidate-crop path; transformed variants are an
+ * explicit user action via the enhancement button.
+ */
 internal object RescueScanPolicy {
-    fun shouldStart(running: Boolean, mode: ScanEnhancementMode): Boolean =
-        mode != ScanEnhancementMode.OFF && !running
+    @Suppress("UNUSED_PARAMETER")
+    fun shouldStart(running: Boolean, mode: ScanEnhancementMode): Boolean = false
 }
 
 internal fun looksLikeGs1(rawBytes: ByteArray): Boolean {

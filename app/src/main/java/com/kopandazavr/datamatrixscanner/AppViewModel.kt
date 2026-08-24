@@ -36,10 +36,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences("scanner_preferences", 0)
     private val scanMutex = Mutex()
     private val photoDecoder = PhotoRecoveryDecoder()
-    private val decodedFrames = MutableSharedFlow<List<DecodedDataMatrix>>(
+
+    // Decoders run in parallel (live ZXing, live candidate ML Kit and manual rescue).
+    // Never let a rare second symbol be overwritten by the next repeated frame of
+    // an already-known symbol. Merge pending results by raw bytes and use the flow
+    // only as a wake-up signal for the IO collector.
+    private val decodedSignal = MutableSharedFlow<Unit>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
+    private val pendingDecodedLock = Any()
+    private val pendingDecoded = LinkedHashMap<String, DecodedDataMatrix>()
+
     private val potentialFrames = MutableSharedFlow<List<DetectionBox>>(
         extraBufferCapacity = 1,
         onBufferOverflow = BufferOverflow.DROP_OLDEST
@@ -76,7 +84,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         refresh()
         refreshRecovery()
         viewModelScope.launch(Dispatchers.IO) {
-            decodedFrames.collect(::processDecodedFrame)
+            decodedSignal.collect {
+                while (true) {
+                    val batch = synchronized(pendingDecodedLock) {
+                        if (pendingDecoded.isEmpty()) {
+                            emptyList()
+                        } else {
+                            pendingDecoded.values.toList().also { pendingDecoded.clear() }
+                        }
+                    }
+                    if (batch.isEmpty()) break
+                    processDecodedFrame(batch)
+                }
+            }
         }
         viewModelScope.launch {
             potentialFrames.collectLatest { potential ->
@@ -95,7 +115,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onDecoded(items: List<DecodedDataMatrix>) {
-        decodedFrames.tryEmit(items)
+        if (items.isEmpty()) return
+        synchronized(pendingDecodedLock) {
+            items.forEach { item ->
+                val key = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)
+                val previous = pendingDecoded[key]
+                pendingDecoded[key] = when {
+                    item.capturedFrame != null -> item
+                    previous?.capturedFrame != null -> item.copy(capturedFrame = previous.capturedFrame)
+                    else -> item
+                }
+            }
+        }
+        decodedSignal.tryEmit(Unit)
     }
 
     fun onPotentialBoxes(boxes: List<DetectionBox>) {
