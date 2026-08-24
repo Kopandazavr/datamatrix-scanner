@@ -29,6 +29,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -147,6 +149,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppMode { LIST, VIEWER, RECOVERY }
 private data class ViewerState(val ids: List<Long>, val index: Int, val source: RecordStatus)
+private val EmbeddedCameraPreviewHeight = 348.dp
 
 @Composable
 private fun ScannerApp(vm: AppViewModel = viewModel()) {
@@ -316,7 +319,7 @@ private fun ListScreen(
                                 }
                             }
                         )
-                        Spacer(Modifier.height(348.dp))
+                        Spacer(Modifier.height(EmbeddedCameraPreviewHeight))
                     }
                 },
                 bottomBar = {
@@ -369,7 +372,7 @@ private fun ListScreen(
         val cameraModifier = if (fullscreen) {
             Modifier.fillMaxSize()
         } else {
-            Modifier.fillMaxWidth().height(348.dp).offset { IntOffset(0, topBarHeightPx) }
+            Modifier.fillMaxWidth().height(EmbeddedCameraPreviewHeight).offset { IntOffset(0, topBarHeightPx) }
         }
         CameraPreview(
             controller = controller,
@@ -498,8 +501,17 @@ private fun CameraPreview(
     recognizedCount: Int? = null,
     onNextBatch: (() -> Unit)? = null
 ) {
-    Box(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
+    BoxWithConstraints(modifier.clipToBounds().background(Color.Black), contentAlignment = Alignment.Center) {
         if (controller != null) {
+            // Keep the camera surface at one stable measured size. Resizing PreviewView
+            // makes CameraX renegotiate the surface and produces a visible black flash.
+            // Fullscreen is therefore only a render transform; the surrounding box clips
+            // the enlarged preview exactly like FILL_CENTER would at the fullscreen ratio.
+            val fullscreenScale = if (fullscreen) {
+                (maxHeight.value / EmbeddedCameraPreviewHeight.value).coerceAtLeast(1f)
+            } else {
+                1f
+            }
             AndroidView(
                 factory = { ctx -> PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
@@ -507,7 +519,13 @@ private fun CameraPreview(
                     this.controller = controller
                 } },
                 update = { it.controller = controller },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .requiredHeight(EmbeddedCameraPreviewHeight)
+                    .graphicsLayer {
+                        scaleX = fullscreenScale
+                        scaleY = fullscreenScale
+                    }
             )
         } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
         DetectionOverlay(boxes)
