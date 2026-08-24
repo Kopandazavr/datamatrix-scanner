@@ -1,0 +1,27 @@
+{
+  "run_id": 32707048980,
+  "status": "completed",
+  "conclusion": "success",
+  "html_url": "https://github.com/Kopandazavr/datamatrix-scanner/actions/runs/32707048980",
+  "head_sha": "7a25844c27c4eace3e49d4c32b79489c83f56271",
+  "artifact": {
+    "id": 9512687911,
+    "node_id": "MDg6QXJ0aWZhY3Q5NTEyNjg3OTEx",
+    "name": "datamatrix-scanner-0.4.6-debug",
+    "size_in_bytes": 33427955,
+    "url": "https://api.github.com/repos/Kopandazavr/datamatrix-scanner/actions/artifacts/9512687911",
+    "archive_download_url": "https://api.github.com/repos/Kopandazavr/datamatrix-scanner/actions/artifacts/9512687911/zip",
+    "expired": false,
+    "digest": "sha256:996fa88d072957b66ec5e18f2772c5a8b9a82bc4ceb55b6aa29b708de68b5f16",
+    "created_at": "2026-08-24T08:36:46Z",
+    "updated_at": "2026-08-24T08:36:46Z",
+    "expires_at": "2026-11-22T08:35:04Z",
+    "workflow_run": {
+      "id": 32707048980,
+      "repository_id": 1343770359,
+      "head_repository_id": 1343770359,
+      "head_branch": "v046-publisher-20260824",
+      "head_sha": "7a25844c27c4eace3e49d4c32b79489c83f56271"
+    }
+  }
+}
