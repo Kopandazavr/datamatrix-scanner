@@ -1,4 +1,4 @@
-name: Export split Gradle cache
+name: Export Android build tools 34
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   statuses: write
 
 jobs:
-  export-cache:
+  export-sdk:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,7 +19,7 @@ jobs:
         run: |
           gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -f state=pending \
-            -f context=offline-cache-export \
+            -f context=sdk34-export \
             -f description="run ${GITHUB_RUN_ID}" \
             -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
       - uses: actions/setup-java@v4
@@ -27,54 +27,14 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-      - name: Ensure Android SDK 35
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
-      - uses: gradle/actions/setup-gradle@v4
-      - name: Prime exact project cache
+      - name: Install and pack build-tools 34
         run: |
-          chmod +x gradlew
-          ./gradlew testDebugUnitTest assembleDebug --stacktrace
-      - name: Pack cache into downloadable pieces
-        run: |
-          set -euxo pipefail
-          rm -rf /tmp/cache-parts && mkdir -p /tmp/cache-parts
-          tar --exclude='*.lock' --exclude='daemon' -czf /tmp/cache-parts/wrapper.tar.gz -C "$HOME" .gradle/wrapper
-          tar --exclude='*.lock' -czf /tmp/cache-parts/modules.tar.gz -C "$HOME" .gradle/caches/modules-2
-          TRANSFORM_PATHS=()
-          [ -d "$HOME/.gradle/caches/transforms-4" ] && TRANSFORM_PATHS+=(.gradle/caches/transforms-4)
-          [ -d "$HOME/.gradle/caches/8.9/transforms" ] && TRANSFORM_PATHS+=(.gradle/caches/8.9/transforms)
-          if [ ${#TRANSFORM_PATHS[@]} -gt 0 ]; then
-            tar --exclude='*.lock' -czf /tmp/cache-parts/transforms.tar.gz -C "$HOME" "${TRANSFORM_PATHS[@]}"
-          else
-            tar -czf /tmp/cache-parts/transforms.tar.gz --files-from /dev/null
-          fi
-          tar --exclude='*.lock' --exclude='.gradle/daemon' --exclude='.gradle/wrapper' \
-              --exclude='.gradle/caches/modules-2' --exclude='.gradle/caches/transforms-4' \
-              --exclude='.gradle/caches/8.9/transforms' \
-              -czf /tmp/cache-parts/misc.tar.gz -C "$HOME" .gradle
-          ls -lh /tmp/cache-parts
-          for f in /tmp/cache-parts/*.tar.gz; do
-            test "$(stat -c %s "$f")" -lt 520000000
-          done
+          sdkmanager "build-tools;34.0.0"
+          tar -czf /tmp/android-build-tools-34.tar.gz -C "$ANDROID_HOME" build-tools/34.0.0
       - uses: actions/upload-artifact@v4
         with:
-          name: gradle-wrapper-part
-          path: /tmp/cache-parts/wrapper.tar.gz
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gradle-modules-part
-          path: /tmp/cache-parts/modules.tar.gz
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gradle-transforms-part
-          path: /tmp/cache-parts/transforms.tar.gz
-          compression-level: 0
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gradle-misc-part
-          path: /tmp/cache-parts/misc.tar.gz
+          name: android-build-tools-34
+          path: /tmp/android-build-tools-34.tar.gz
           compression-level: 0
       - name: Mark status
         if: always()
@@ -84,6 +44,6 @@ jobs:
         run: |
           gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
             -f state="${CI_STATE}" \
-            -f context=offline-cache-export \
+            -f context=sdk34-export \
             -f description="run ${GITHUB_RUN_ID}" \
             -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
