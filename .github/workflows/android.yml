@@ -1,86 +1,59 @@
-name: Build Android APK
+name: Bootstrap offline Android toolchain
 
 on:
   push:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: write
-  statuses: write
 
 jobs:
-  build:
+  bootstrap:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Publish CI run locator
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -f state=pending \
-            -f context=ci-delivery \
-            -f description="run ${GITHUB_RUN_ID}" \
-            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Prepare source snapshot
-        run: |
-          rm -rf /tmp/datamatrix-scanner-source
-          mkdir -p /tmp/datamatrix-scanner-source
-          rsync -a --exclude='.git/' --exclude='.gradle/' --exclude='build/' ./ /tmp/datamatrix-scanner-source/
-      - name: Prepare local signing tools fallback
-        run: |
-          mkdir -p /tmp/android-build-tools/lib
-          mkdir -p /tmp/android-build-tools/lib64
-          cp "$ANDROID_HOME/build-tools/35.0.0/apksigner" /tmp/android-build-tools/
-          cp "$ANDROID_HOME/build-tools/35.0.0/zipalign" /tmp/android-build-tools/
-          cp "$ANDROID_HOME/build-tools/35.0.0/aapt2" /tmp/android-build-tools/
-          cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" /tmp/android-build-tools/lib/
-          LIBCXX="$(find "$ANDROID_HOME/build-tools/35.0.0" -type f -name 'libc++.so' -print -quit)"
-          test -n "$LIBCXX"
-          cp "$LIBCXX" /tmp/android-build-tools/lib64/libc++.so
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
       - uses: gradle/actions/setup-gradle@v4
-      - name: Build and test
+      - name: Prime Gradle and dependency caches on unchanged baseline
         run: |
           chmod +x gradlew
           ./gradlew testDebugUnitTest assembleDebug --stacktrace
+      - name: Pack offline Gradle cache
+        run: |
+          rm -rf /tmp/offline-gradle
+          mkdir -p /tmp/offline-gradle
+          rsync -a --exclude='*.lock' --exclude='daemon/' "$HOME/.gradle/" /tmp/offline-gradle/
+      - name: Pack minimal Android SDK 35
+        run: |
+          rm -rf /tmp/offline-android
+          mkdir -p /tmp/offline-android/platforms /tmp/offline-android/build-tools
+          cp -a "$ANDROID_HOME/platforms/android-35" /tmp/offline-android/platforms/
+          cp -a "$ANDROID_HOME/build-tools/35.0.0" /tmp/offline-android/build-tools/
+          cp -a "$ANDROID_HOME/platform-tools" /tmp/offline-android/
+          if [ -d "$ANDROID_HOME/licenses" ]; then cp -a "$ANDROID_HOME/licenses" /tmp/offline-android/; fi
       - uses: actions/upload-artifact@v4
         with:
-          name: datamatrix-scanner-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
-      - uses: actions/upload-artifact@v4
-        with:
-          name: datamatrix-scanner-source
-          path: /tmp/datamatrix-scanner-source/
+          name: datamatrix-offline-gradle
+          path: /tmp/offline-gradle/
           include-hidden-files: true
+          compression-level: 6
       - uses: actions/upload-artifact@v4
         with:
-          name: android-build-tools-local-fallback
-          path: /tmp/android-build-tools/
-      - name: Publish latest debug APK
-        env:
-          GH_TOKEN: ${{ github.token }}
+          name: datamatrix-offline-android-sdk
+          path: /tmp/offline-android/
+          include-hidden-files: true
+          compression-level: 6
+      - name: Restore regular CI workflow
         run: |
-          gh release delete latest-debug --cleanup-tag --yes || true
-          gh release create latest-debug app/build/outputs/apk/debug/app-debug.apk \
-            --prerelease \
-            --title "Data Matrix Scanner — latest debug" \
-            --notes "Автоматическая debug-сборка из резервного GitHub CI. Основная актуальная кодовая копия хранится на Google Drive."
-      - name: Mark CI delivery status
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CI_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
-        run: |
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
-            -f state="${CI_STATE}" \
-            -f context=ci-delivery \
-            -f description="run ${GITHUB_RUN_ID}" \
-            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          git show HEAD^:.github/workflows/android.yml > .github/workflows/android.yml
+          git add .github/workflows/android.yml
+          git config user.name "Kopandazavr"
+          git config user.email "101416382+Kopandazavr@users.noreply.github.com"
+          git commit -m "ci: restore Android build workflow"
+          git push origin HEAD:main
