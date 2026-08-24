@@ -1,0 +1,60 @@
+name: Verify 0.4.7 candidate
+
+on:
+  push:
+    branches: [v047-ci-20260824]
+    paths-ignore:
+      - '.github/v047-ci-result.txt'
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_MAIN: 9c7a3b7d69a8f4528467f6cf85c264f6d37f669d
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify app content matches main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = "$EXPECTED_MAIN"
+          git diff --quiet origin/main -- app
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests and APK build
+        id: build
+        continue-on-error: true
+        run: |
+          chmod +x gradlew
+          ./gradlew testDebugUnitTest assembleDebug --stacktrace
+      - name: Upload debug APK
+        if: steps.build.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: datamatrix-scanner-0.4.7-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish CI marker
+        if: always()
+        run: |
+          printf 'run_id=%s\nmain_sha=%s\nbuild_outcome=%s\nartifact_name=%s\n' \
+            "$GITHUB_RUN_ID" "$EXPECTED_MAIN" "${{ steps.build.outcome }}" 'datamatrix-scanner-0.4.7-debug' \
+            > .github/v047-ci-result.txt
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/v047-ci-result.txt
+          git commit -m 'ci: record 0.4.7 verification result'
+          git push origin HEAD:v047-ci-20260824
+      - name: Fail job when build failed
+        if: steps.build.outcome != 'success'
+        run: exit 1
