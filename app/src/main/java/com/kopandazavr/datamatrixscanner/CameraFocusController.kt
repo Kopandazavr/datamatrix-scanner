@@ -1,7 +1,12 @@
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+
 package com.kopandazavr.datamatrixscanner
 
 import android.content.Context
+import android.hardware.camera2.CaptureRequest
 import android.os.SystemClock
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.CaptureRequestOptions
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.view.LifecycleCameraController
@@ -62,6 +67,13 @@ internal fun rememberCameraFocusController(
 
     LaunchedEffect(active, controller) {
         if (!active || controller == null) return@LaunchedEffect
+
+        // Samsung/Camera2 may otherwise return to CONTINUOUS_PICTURE a few seconds
+        // after a successful FocusMeteringAction even though app auto-focus is off.
+        // Keep the repeating request in discrete AUTO AF mode. The lens is moved only
+        // by an explicit FocusMeteringAction below; there is no timer-driven focus loop.
+        holdDiscreteAfMode(context, controller)
+
         for (request in requests) {
             nominalProgressMs = request.mode.nominalProgressMs
             busy = true
@@ -149,6 +161,44 @@ private suspend fun runCenterFocusSession(
     return anySuccess
 }
 
+/**
+ * Force the Camera2 repeating request out of CONTINUOUS_PICTURE. In CONTROL_AF_MODE_AUTO
+ * the AF trigger below locks at its result and does not start passive lens hunting on
+ * its own. If the device/implementation rejects the interop option, CameraX keeps its
+ * previous behaviour rather than failing the focus UI.
+ */
+private suspend fun holdDiscreteAfMode(
+    context: Context,
+    controller: LifecycleCameraController
+): Boolean {
+    val cameraControl = controller.cameraControl ?: return false
+    val camera2Control = runCatching { Camera2CameraControl.from(cameraControl) }.getOrNull()
+        ?: return false
+    val options = CaptureRequestOptions.Builder()
+        .setCaptureRequestOption(
+            CaptureRequest.CONTROL_AF_MODE,
+            CaptureRequest.CONTROL_AF_MODE_AUTO
+        )
+        .build()
+    val future = runCatching {
+        camera2Control.setCaptureRequestOptions(options)
+    }.getOrNull() ?: return false
+
+    return suspendCancellableCoroutine { continuation ->
+        future.addListener(
+            {
+                val success = runCatching {
+                    future.get()
+                    true
+                }.getOrDefault(false)
+                if (continuation.isActive) continuation.resume(success)
+            },
+            ContextCompat.getMainExecutor(context)
+        )
+        continuation.invokeOnCancellation { future.cancel(true) }
+    }
+}
+
 private suspend fun performCenterFocusAttempt(
     context: Context,
     controller: LifecycleCameraController
@@ -157,9 +207,9 @@ private suspend fun performCenterFocusAttempt(
         .createPoint(.5f, .5f, .10f)
     val action = FocusMeteringAction.Builder(
         point,
-        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
+        FocusMeteringAction.FLAG_AF
     )
-        // Keep the result instead of releasing focus back to a potentially blurry state.
+        // Keep the AF trigger active instead of releasing focus back to continuous AF.
         .disableAutoCancel()
         .build()
     val future = runCatching {

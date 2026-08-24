@@ -20,6 +20,11 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Prepare source snapshot
+        run: |
+          rm -rf /tmp/datamatrix-scanner-source
+          mkdir -p /tmp/datamatrix-scanner-source
+          rsync -a --exclude='.git/' --exclude='.gradle/' --exclude='build/' ./ /tmp/datamatrix-scanner-source/
       - uses: gradle/actions/setup-gradle@v4
       - name: Build and test
         run: |
@@ -29,6 +34,11 @@ jobs:
         with:
           name: datamatrix-scanner-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datamatrix-scanner-source
+          path: /tmp/datamatrix-scanner-source/
+          include-hidden-files: true
       - name: Publish latest debug APK
         env:
           GH_TOKEN: ${{ github.token }}
@@ -37,4 +47,4 @@ jobs:
           gh release create latest-debug app/build/outputs/apk/debug/app-debug.apk \
             --prerelease \
             --title "Data Matrix Scanner — latest debug" \
-            --notes "Автоматическая debug-сборка из main. Скачайте app-debug.apk в Assets."
+            --notes "Автоматическая debug-сборка из резервного GitHub CI. Основная актуальная кодовая копия хранится на Google Drive."
