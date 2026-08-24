@@ -30,13 +30,6 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
-      - name: Export Android platform 35
-        run: |
-          tar -czf /tmp/android-platform-35.tar.gz -C "$ANDROID_HOME" platforms/android-35
-      - uses: actions/upload-artifact@v4
-        with:
-          name: android-platform-35
-          path: /tmp/android-platform-35.tar.gz
       - name: Prepare source snapshot
         run: |
           rm -rf /tmp/datamatrix-scanner-source
