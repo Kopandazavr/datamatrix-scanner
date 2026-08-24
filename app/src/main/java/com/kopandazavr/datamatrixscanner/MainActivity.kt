@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -42,6 +43,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -204,9 +206,9 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
         if (mode == AppMode.LIST && controller != null) {
             // Focus is driven only by a cheap sharpness estimate around the cross.
             // Candidate/decoded boxes are intentionally not part of this decision.
-            delay(500)
+            delay(150)
             val point = SurfaceOrientedMeteringPointFactory(1f, 1f)
-                .createPoint(.5f, .5f, .16f)
+                .createPoint(.5f, .5f, .10f)
             val action = FocusMeteringAction.Builder(
                 point,
                 FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE or FocusMeteringAction.FLAG_AWB
@@ -214,11 +216,31 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
                 // Keep a successful focus instead of releasing it back to a blurry state.
                 .disableAutoCancel()
                 .build()
+            var focusInFlight = false
+            var lastFocusRequestAt = 0L
             while (true) {
-                if (analyzer.needsCenterRefocus()) {
-                    runCatching { controller.cameraControl?.startFocusAndMetering(action) }
+                val now = SystemClock.elapsedRealtime()
+                if (
+                    analyzer.needsCenterRefocus() &&
+                    !focusInFlight &&
+                    now - lastFocusRequestAt >= 800L
+                ) {
+                    val future = runCatching {
+                        controller.cameraControl?.startFocusAndMetering(action)
+                    }.getOrNull()
+                    if (future != null) {
+                        focusInFlight = true
+                        lastFocusRequestAt = now
+                        future.addListener(
+                            {
+                                runCatching { future.get() }
+                                focusInFlight = false
+                            },
+                            ContextCompat.getMainExecutor(context)
+                        )
+                    }
                 }
-                delay(1_000)
+                delay(200)
             }
         }
     }
@@ -535,7 +557,11 @@ private fun CameraPreview(
         Box(Modifier.fillMaxSize().clickable(onClick = onClick))
         if (fullscreen) {
             Row(
-                Modifier.fillMaxWidth().padding(top = 28.dp, start = 8.dp, end = 16.dp),
+                Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .padding(start = 8.dp, end = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White) }

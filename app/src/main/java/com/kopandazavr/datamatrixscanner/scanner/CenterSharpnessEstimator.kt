@@ -2,10 +2,11 @@ package com.kopandazavr.datamatrixscanner.scanner
 
 import java.nio.ByteBuffer
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.min
 
-internal const val CENTER_SHARP_THRESHOLD = 10f
-internal const val CENTER_BLUR_THRESHOLD = 7f
+internal const val CENTER_SHARP_THRESHOLD = 12f
+internal const val CENTER_BLUR_THRESHOLD = 8f
 
 /**
  * Cheap focus signal for the small area covered by the centre aim.
@@ -24,7 +25,7 @@ internal fun estimateCenterSharpness(
     cropTop: Int = 0,
     cropRight: Int = imageWidth,
     cropBottom: Int = imageHeight,
-    regionFraction: Float = .18f
+    regionFraction: Float = .12f
 ): Float? {
     if (imageWidth < 5 || imageHeight < 5 || rowStride <= 0 || pixelStride <= 0) return null
 
@@ -55,10 +56,13 @@ internal fun estimateCenterSharpness(
         return luma.get(index).toInt() and 0xff
     }
 
-    var laplacianSum = 0L
-    var samples = 0
+    var weightedLaplacianSum = 0L
+    var totalWeight = 0L
     return try {
-        // Every second pixel is enough for the decision while keeping the work tiny.
+        // Prefer the pixels directly under the cross. Clipping keeps one sharp shelf
+        // or pack edge near the outside of the region from masking a blurry code.
+        val innerRadius = (diameter / 6).coerceAtLeast(1)
+        val middleRadius = (diameter / 3).coerceAtLeast(innerRadius + 1)
         var y = top
         while (y < bottom) {
             var x = left
@@ -67,13 +71,19 @@ internal fun estimateCenterSharpness(
                 val laplacian = 4 * center -
                     yAt(x - 1, y) - yAt(x + 1, y) -
                     yAt(x, y - 1) - yAt(x, y + 1)
-                laplacianSum += abs(laplacian)
-                samples += 1
+                val distance = max(abs(x - centerX), abs(y - centerY))
+                val weight = when {
+                    distance <= innerRadius -> 4
+                    distance <= middleRadius -> 2
+                    else -> 1
+                }
+                weightedLaplacianSum += abs(laplacian).coerceAtMost(96) * weight
+                totalWeight += weight
                 x += 2
             }
             y += 2
         }
-        if (samples == 0) null else laplacianSum.toFloat() / samples
+        if (totalWeight == 0L) null else weightedLaplacianSum.toFloat() / totalWeight
     } catch (_: IndexOutOfBoundsException) {
         null
     }

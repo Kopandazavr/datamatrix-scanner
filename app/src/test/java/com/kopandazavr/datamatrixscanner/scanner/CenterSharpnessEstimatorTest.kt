@@ -38,4 +38,34 @@ class CenterSharpnessEstimatorTest {
         assertFalse(updateCenterSharpState(wasSharp = true, score = CENTER_BLUR_THRESHOLD - .1f))
         assertFalse(updateCenterSharpState(wasSharp = false, score = CENTER_SHARP_THRESHOLD - .1f))
     }
+
+    @Test
+    fun detailUnderCrossOutweighsDetailNearRegionEdge() {
+        val width = 120
+        val height = 120
+        val centreDetail = ByteArray(width * height) { 128.toByte() }
+        val edgeDetail = centreDetail.copyOf()
+
+        for (y in 52 until 68) {
+            for (x in 52 until 68) {
+                centreDetail[y * width + x] = if ((x / 2 + y / 2) % 2 == 0) 32.toByte() else 224.toByte()
+            }
+        }
+        for (y in 52 until 68) {
+            for (x in 38 until 54) {
+                edgeDetail[y * width + x] = if ((x / 2 + y / 2) % 2 == 0) 32.toByte() else 224.toByte()
+            }
+        }
+
+        val centreScore = estimateCenterSharpness(
+            ByteBuffer.wrap(centreDetail), width, height, width, 1, regionFraction = .40f
+        )
+        val edgeScore = estimateCenterSharpness(
+            ByteBuffer.wrap(edgeDetail), width, height, width, 1, regionFraction = .40f
+        )
+
+        assertNotNull(centreScore)
+        assertNotNull(edgeScore)
+        assertTrue(requireNotNull(centreScore) > requireNotNull(edgeScore))
+    }
 }
