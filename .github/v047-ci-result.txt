@@ -1,0 +1,4 @@
+run_id=32711263869
+main_sha=9c7a3b7d69a8f4528467f6cf85c264f6d37f669d
+build_outcome=success
+artifact_name=datamatrix-scanner-0.4.7-debug
