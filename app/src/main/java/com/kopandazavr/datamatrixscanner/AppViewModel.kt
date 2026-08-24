@@ -1,7 +1,12 @@
 package com.kopandazavr.datamatrixscanner
 
 import android.app.Application
+import android.content.Context
 import android.net.Uri
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -34,6 +39,12 @@ import java.util.concurrent.ConcurrentHashMap
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = CodeRepository(application)
     private val prefs = application.getSharedPreferences("scanner_preferences", 0)
+    private val scanHapticVibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        application.getSystemService(VibratorManager::class.java)?.defaultVibrator
+    } else {
+        @Suppress("DEPRECATION")
+        application.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+    }
     private val scanMutex = Mutex()
     private val photoDecoder = PhotoRecoveryDecoder()
 
@@ -160,11 +171,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         is ScanOutcome.New -> {
                             changed = true
                             activatedRecord = true
+                            performStrongLiveScanHaptic()
                             DetectionHighlight.ACTIVE
                         }
                         is ScanOutcome.Restored -> {
                             changed = true
                             activatedRecord = true
+                            performStrongLiveScanHaptic()
                             if (outcome.from == RecordStatus.ARCHIVED) DetectionHighlight.DUPLICATE else DetectionHighlight.ACTIVE
                         }
                         is ScanOutcome.IgnoredActive -> {
@@ -195,6 +208,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 publishBoxes()
             }
         }
+    }
+
+    private fun performStrongLiveScanHaptic() {
+        val vibrator = scanHapticVibrator ?: return
+        if (!vibrator.hasVibrator()) return
+        val effect = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            VibrationEffect.createPredefined(VibrationEffect.EFFECT_HEAVY_CLICK)
+        } else {
+            VibrationEffect.createOneShot(45L, 220)
+        }
+        vibrator.vibrate(effect)
     }
 
     private fun clearBoxesAfterSilence() {
