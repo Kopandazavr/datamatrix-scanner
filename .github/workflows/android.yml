@@ -35,6 +35,13 @@ jobs:
           rm -rf /tmp/datamatrix-scanner-source
           mkdir -p /tmp/datamatrix-scanner-source
           rsync -a --exclude='.git/' --exclude='.gradle/' --exclude='build/' ./ /tmp/datamatrix-scanner-source/
+      - name: Prepare local signing tools fallback
+        run: |
+          mkdir -p /tmp/android-build-tools/lib
+          cp "$ANDROID_HOME/build-tools/35.0.0/apksigner" /tmp/android-build-tools/
+          cp "$ANDROID_HOME/build-tools/35.0.0/zipalign" /tmp/android-build-tools/
+          cp "$ANDROID_HOME/build-tools/35.0.0/aapt2" /tmp/android-build-tools/
+          cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" /tmp/android-build-tools/lib/
       - uses: gradle/actions/setup-gradle@v4
       - name: Build and test
         run: |
@@ -49,6 +56,10 @@ jobs:
           name: datamatrix-scanner-source
           path: /tmp/datamatrix-scanner-source/
           include-hidden-files: true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-build-tools-local-fallback
+          path: /tmp/android-build-tools/
       - name: Publish latest debug APK
         env:
           GH_TOKEN: ${{ github.token }}
