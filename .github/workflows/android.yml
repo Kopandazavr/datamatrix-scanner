@@ -30,11 +30,30 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Install Android SDK
         run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Materialize canonical 0.6.4 source
+        run: |
+          set -euo pipefail
+          base64 -d ci/0.6.4-from-drive.patch.gz.b64 | gzip -dc > /tmp/dms-0.6.4.patch
+          python -m pip install --quiet gdown
+          gdown --fuzzy "https://drive.google.com/file/d/1LNTzHeyMT0Ph1aO-vxZWj-7ao7zED5FD/view" -O /tmp/dms-base.zip
+          rm -rf /tmp/dms-base
+          mkdir -p /tmp/dms-base
+          unzip -q /tmp/dms-base.zip -d /tmp/dms-base
+          SRC=/tmp/dms-base
+          if [ ! -f "$SRC/settings.gradle.kts" ]; then
+            SRC="$(find /tmp/dms-base -mindepth 1 -maxdepth 2 -type f -name settings.gradle.kts -printf '%h\n' | head -n1)"
+          fi
+          test -n "$SRC"
+          test -f "$SRC/settings.gradle.kts"
+          (cd "$SRC" && patch -p1 --batch --forward < /tmp/dms-0.6.4.patch)
+          rsync -a --delete --exclude='.git/' --exclude='ci/' "$SRC/" ./
+          grep -q 'versionCode = 35' app/build.gradle.kts
+          grep -q 'versionName = "0.6.4"' app/build.gradle.kts
       - name: Prepare source snapshot
         run: |
           rm -rf /tmp/datamatrix-scanner-source
           mkdir -p /tmp/datamatrix-scanner-source
-          rsync -a --exclude='.git/' --exclude='.gradle/' --exclude='build/' ./ /tmp/datamatrix-scanner-source/
+          rsync -a --exclude='.git/' --exclude='.gradle/' --exclude='.kotlin/' --exclude='build/' --exclude='ci/' ./ /tmp/datamatrix-scanner-source/
       - name: Prepare local signing tools fallback
         run: |
           mkdir -p /tmp/android-build-tools/lib
@@ -50,11 +69,15 @@ jobs:
       - name: Build and test
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest assembleDebug --stacktrace
+          ./gradlew testDebugUnitTest assembleDebug assembleRelease --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: datamatrix-scanner-debug
           path: app/build/outputs/apk/debug/app-debug.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datamatrix-scanner-release-unsigned
+          path: app/build/outputs/apk/release/app-release-unsigned.apk
       - uses: actions/upload-artifact@v4
         with:
           name: datamatrix-scanner-source
