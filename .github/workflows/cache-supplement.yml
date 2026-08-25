@@ -44,9 +44,7 @@ jobs:
             .gradle/caches/modules-2/files-2.1/jakarta.activation \
             .gradle/caches/modules-2/files-2.1/com.google.code.findbugs \
             .gradle/caches/modules-2/files-2.1/com.google.j2objc \
-            .gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-gradle-plugin-api \
-            .gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-compiler-runner \
-            .gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin/kotlin-gradle-plugin-annotations
+            .gradle/caches/modules-2/files-2.1/org.jetbrains.kotlin
       - uses: actions/upload-artifact@v4
         with:
           name: gradle-cache-supplement
