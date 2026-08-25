@@ -33,7 +33,9 @@ jobs:
       - name: Materialize canonical 0.6.4 source
         run: |
           set -euo pipefail
-          base64 -d ci/0.6.4-from-drive.patch.gz.b64 | gzip -dc > /tmp/dms-0.6.4.patch
+          cat ci/payload/part* > /tmp/dms-patch.b64
+          echo "a503e650ed43b761d56c051e6e159c535744125c69f80513cef79ad3bd77d19c  /tmp/dms-patch.b64" | sha256sum -c -
+          base64 -d /tmp/dms-patch.b64 | gzip -dc > /tmp/dms-0.6.4.patch
           python -m pip install --quiet gdown
           gdown --fuzzy "https://drive.google.com/file/d/1LNTzHeyMT0Ph1aO-vxZWj-7ao7zED5FD/view" -O /tmp/dms-base.zip
           rm -rf /tmp/dms-base
