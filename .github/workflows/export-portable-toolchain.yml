@@ -1,0 +1,48 @@
+name: Export portable toolchain
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/export-portable-toolchain.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17.0.20+8'
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned platform tools
+        run: sdkmanager 'platform-tools'
+      - name: Verify and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -XshowSettings:properties -version 2>&1 | tee /tmp/java-version.txt
+          grep -F 'java.vendor = Eclipse Adoptium' /tmp/java-version.txt
+          grep -F 'java.runtime.version = 17.0.20+8' /tmp/java-version.txt
+          grep '^Pkg.Revision=' "$ANDROID_HOME/platform-tools/source.properties" | tee /tmp/platform-tools-version.txt
+          tar -C "$JAVA_HOME" -czf /tmp/temurin-jdk17.0.20+8-linux-x64.tar.gz .
+          tar -C "$ANDROID_HOME" -czf /tmp/android-platform-tools-linux.tar.gz platform-tools
+          sha256sum /tmp/temurin-jdk17.0.20+8-linux-x64.tar.gz > /tmp/temurin-jdk17.0.20+8-linux-x64.tar.gz.sha256
+          sha256sum /tmp/android-platform-tools-linux.tar.gz > /tmp/android-platform-tools-linux.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dms-temurin-jdk17.0.20-linux-x64
+          path: |
+            /tmp/temurin-jdk17.0.20+8-linux-x64.tar.gz
+            /tmp/temurin-jdk17.0.20+8-linux-x64.tar.gz.sha256
+            /tmp/java-version.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dms-android-platform-tools-linux
+          path: |
+            /tmp/android-platform-tools-linux.tar.gz
+            /tmp/android-platform-tools-linux.tar.gz.sha256
+            /tmp/platform-tools-version.txt
