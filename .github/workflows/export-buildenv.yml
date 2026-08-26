@@ -1,4 +1,4 @@
-name: Export deterministic build JDK
+name: Export deterministic build core
 
 on:
   push:
@@ -8,26 +8,44 @@ permissions:
   contents: read
 
 jobs:
-  export-jdk:
+  export-core:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '17.0.20.1+1'
           check-latest: false
-      - name: Record and package JDK
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned Android SDK
         run: |
           set -euo pipefail
-          "$JAVA_HOME/bin/java" -version 2>&1 | tee /tmp/java-version.txt
-          tar -C "$JAVA_HOME" -czf /tmp/dms-temurin17-linux-x64.tar.gz .
-          sha256sum /tmp/dms-temurin17-linux-x64.tar.gz | tee /tmp/dms-temurin17-linux-x64.sha256
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+      - name: Materialize pinned Gradle Wrapper distribution
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --version
+      - name: Package canonical build core
+        run: |
+          set -euo pipefail
+          ROOT=/tmp/dms-build-env-core-v1
+          mkdir -p "$ROOT/jdk17" "$ROOT/android-sdk/platforms" "$ROOT/android-sdk/build-tools" "$ROOT/gradle-home/wrapper/dists"
+          cp -a "$JAVA_HOME"/. "$ROOT/jdk17/"
+          cp -a "$ANDROID_HOME/platforms/android-35" "$ROOT/android-sdk/platforms/"
+          cp -a "$ANDROID_HOME/build-tools/35.0.0" "$ROOT/android-sdk/build-tools/"
+          cp -a "$ANDROID_HOME/platform-tools" "$ROOT/android-sdk/"
+          if [ -d "$ANDROID_HOME/licenses" ]; then cp -a "$ANDROID_HOME/licenses" "$ROOT/android-sdk/"; fi
+          cp -a "$HOME/.gradle/wrapper/dists/gradle-8.9-bin" "$ROOT/gradle-home/wrapper/dists/"
+          "$ROOT/jdk17/bin/java" -version 2>&1 | tee "$ROOT/java-version.txt"
+          "$ROOT/gradle-home/wrapper/dists/gradle-8.9-bin"/*/gradle-8.9/bin/gradle --version | tee "$ROOT/gradle-version.txt"
+          tar -C /tmp -czf /tmp/dms-build-env-core-v1-linux-x64.tar.gz dms-build-env-core-v1
+          sha256sum /tmp/dms-build-env-core-v1-linux-x64.tar.gz | tee /tmp/dms-build-env-core-v1-linux-x64.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: dms-temurin17-linux-x64
+          name: dms-build-env-core-v1-linux-x64
           path: |
-            /tmp/dms-temurin17-linux-x64.tar.gz
-            /tmp/dms-temurin17-linux-x64.sha256
-            /tmp/java-version.txt
+            /tmp/dms-build-env-core-v1-linux-x64.tar.gz
+            /tmp/dms-build-env-core-v1-linux-x64.sha256
           retention-days: 90
