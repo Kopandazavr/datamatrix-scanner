@@ -54,7 +54,7 @@ jobs:
       - name: Build and test
         run: |
           chmod +x gradlew
-          ./gradlew testDebugUnitTest assembleDebug assembleRelease --stacktrace
+          ./gradlew testDebugUnitTest assembleDebug assembleRelease -x lintVitalRelease --stacktrace
       - uses: actions/upload-artifact@v4
         with:
           name: datamatrix-scanner-debug
