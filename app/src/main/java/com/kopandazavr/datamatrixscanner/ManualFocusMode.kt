@@ -2,25 +2,25 @@ package com.kopandazavr.datamatrixscanner
 
 internal enum class ManualFocusMode(
     val title: String,
-    val maxAttempts: Int,
-    val settleDelayMs: Long,
+    val coarseSegments: Int,
+    val finePass: Boolean,
     val nominalProgressMs: Float
 ) {
     FAST(
         title = "Быстрый",
-        maxAttempts = 1,
-        settleDelayMs = 0L,
-        nominalProgressMs = 650f
+        coarseSegments = 4,
+        finePass = false,
+        nominalProgressMs = 1_100f
     ),
     PRECISE(
         title = "Точный",
-        maxAttempts = 2,
-        settleDelayMs = 450L,
-        nominalProgressMs = 1_800f
+        coarseSegments = 7,
+        finePass = true,
+        nominalProgressMs = 2_100f
     );
 
     companion object {
         fun fromPreference(value: String?): ManualFocusMode =
-            entries.firstOrNull { it.name == value } ?: FAST
+            entries.firstOrNull { it.name == value } ?: PRECISE
     }
 }

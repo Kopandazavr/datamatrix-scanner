@@ -8,6 +8,31 @@ import kotlin.math.min
 internal const val CENTER_SHARP_THRESHOLD = 12f
 internal const val CENTER_BLUR_THRESHOLD = 8f
 internal const val CENTER_CHANGE_THRESHOLD = 6f
+internal const val MANUAL_FOCUS_SHARP_THRESHOLD = 14f
+internal const val MANUAL_FOCUS_BEST_RATIO = .80f
+
+/**
+ * Focus-time sharpness signal for the object deliberately placed under the centre cross.
+ * [core] is intentionally small; [context] only helps when it agrees with the core and is
+ * capped so a crisp shelf/background around a blurry Data Matrix cannot win the focus search.
+ */
+data class TargetSharpnessProfile(
+    val score: Float,
+    val core: Float,
+    val context: Float
+)
+
+internal fun manualFocusThreshold(bestSharpness: Float): Float =
+    max(MANUAL_FOCUS_SHARP_THRESHOLD, bestSharpness * MANUAL_FOCUS_BEST_RATIO)
+
+internal fun needsManualAf(
+    currentSharpness: Float?,
+    bestSharpness: Float,
+    motionRefocusNeeded: Boolean,
+    focusFailureRefocusNeeded: Boolean
+): Boolean = currentSharpness == null ||
+    currentSharpness < manualFocusThreshold(bestSharpness) ||
+    motionRefocusNeeded || focusFailureRefocusNeeded
 
 /**
  * Cheap focus signal for the small area covered by the centre aim.
@@ -88,6 +113,58 @@ internal fun estimateCenterSharpness(
     } catch (_: IndexOutOfBoundsException) {
         null
     }
+}
+
+/**
+ * Two-scale sharpness used by the manual focus sweep.
+ *
+ * The scanner UI asks the user to put the Data Matrix under the centre cross, therefore a small
+ * central patch is a much stronger signal than detail farther away. The wider patch still helps
+ * when the cross is not perfectly centred, but its contribution is capped relative to the core.
+ */
+internal fun estimateTargetSharpness(
+    luma: ByteBuffer,
+    imageWidth: Int,
+    imageHeight: Int,
+    rowStride: Int,
+    pixelStride: Int,
+    cropLeft: Int = 0,
+    cropTop: Int = 0,
+    cropRight: Int = imageWidth,
+    cropBottom: Int = imageHeight,
+    coreFraction: Float = .075f,
+    contextFraction: Float = .16f
+): TargetSharpnessProfile? {
+    val core = estimateCenterSharpness(
+        luma = luma,
+        imageWidth = imageWidth,
+        imageHeight = imageHeight,
+        rowStride = rowStride,
+        pixelStride = pixelStride,
+        cropLeft = cropLeft,
+        cropTop = cropTop,
+        cropRight = cropRight,
+        cropBottom = cropBottom,
+        regionFraction = coreFraction
+    ) ?: return null
+    val context = estimateCenterSharpness(
+        luma = luma,
+        imageWidth = imageWidth,
+        imageHeight = imageHeight,
+        rowStride = rowStride,
+        pixelStride = pixelStride,
+        cropLeft = cropLeft,
+        cropTop = cropTop,
+        cropRight = cropRight,
+        cropBottom = cropBottom,
+        regionFraction = contextFraction
+    ) ?: core
+
+    // A very sharp background must not compensate for a blurry object directly under the cross.
+    // The additive allowance keeps low-contrast but genuinely sharp codes usable.
+    val cappedContext = min(context, core * 1.45f + 4f)
+    val combined = core * .76f + cappedContext * .24f
+    return TargetSharpnessProfile(combined, core, context)
 }
 
 internal fun updateCenterSharpState(wasSharp: Boolean, score: Float): Boolean =

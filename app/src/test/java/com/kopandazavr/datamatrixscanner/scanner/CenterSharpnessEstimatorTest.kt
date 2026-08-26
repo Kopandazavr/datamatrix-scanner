@@ -70,6 +70,41 @@ class CenterSharpnessEstimatorTest {
     }
 
     @Test
+    fun targetProfileDoesNotLetSharpBackgroundHideBlurryCross() {
+        val width = 160
+        val height = 160
+        val blurryTargetSharpBackground = ByteArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            if ((x / 2 + y / 2) % 2 == 0) 28.toByte() else 228.toByte()
+        }
+        // Deliberately blur the small object under the cross while leaving its surroundings crisp.
+        for (y in 72 until 88) {
+            for (x in 72 until 88) blurryTargetSharpBackground[y * width + x] = 128.toByte()
+        }
+
+        val sharpTargetSoftBackground = ByteArray(width * height) { 128.toByte() }
+        for (y in 70 until 90) {
+            for (x in 70 until 90) {
+                sharpTargetSoftBackground[y * width + x] =
+                    if ((x / 2 + y / 2) % 2 == 0) 28.toByte() else 228.toByte()
+            }
+        }
+
+        val blurry = estimateTargetSharpness(
+            ByteBuffer.wrap(blurryTargetSharpBackground), width, height, width, 1
+        )
+        val sharp = estimateTargetSharpness(
+            ByteBuffer.wrap(sharpTargetSoftBackground), width, height, width, 1
+        )
+
+        assertNotNull(blurry)
+        assertNotNull(sharp)
+        assertTrue(requireNotNull(sharp).score > requireNotNull(blurry).score)
+        assertTrue(sharp.core > blurry.core)
+    }
+
+    @Test
     fun centreChangeIgnoresUniformExposureShift() {
         val previous = ByteArray(144) { index -> (40 + index % 20).toByte() }
         val current = ByteArray(144) { index -> (60 + index % 20).toByte() }
@@ -93,5 +128,20 @@ class CenterSharpnessEstimatorTest {
 
         assertNotNull(change)
         assertTrue(requireNotNull(change) >= CENTER_CHANGE_THRESHOLD)
+    }
+
+    @Test
+    fun manualAfSkipsOnlyClearlySharpCentre() {
+        assertTrue(needsManualAf(13.9f, 14f, motionRefocusNeeded = false, focusFailureRefocusNeeded = false))
+        assertFalse(needsManualAf(14f, 14f, motionRefocusNeeded = false, focusFailureRefocusNeeded = false))
+        // A camera that has previously achieved a much sharper centre gets an adaptive bar.
+        assertTrue(needsManualAf(19.9f, 25f, motionRefocusNeeded = false, focusFailureRefocusNeeded = false))
+        assertFalse(needsManualAf(20f, 25f, motionRefocusNeeded = false, focusFailureRefocusNeeded = false))
+    }
+
+    @Test
+    fun motionOrPreviousAfFailureForcesAnotherAfEvenWhenSharp() {
+        assertTrue(needsManualAf(30f, 25f, motionRefocusNeeded = true, focusFailureRefocusNeeded = false))
+        assertTrue(needsManualAf(30f, 25f, motionRefocusNeeded = false, focusFailureRefocusNeeded = true))
     }
 }
