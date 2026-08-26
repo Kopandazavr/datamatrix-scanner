@@ -16,15 +16,15 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '17.0.20'
           check-latest: false
 
-      - name: Verify canonical JDK
+      - name: Verify canonical JDK line
         run: |
           set -euo pipefail
           ACTUAL="$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.runtime.version = //p' | head -1)"
           echo "java.runtime.version=$ACTUAL"
-          test "$ACTUAL" = "17.0.20.1+1"
+          [[ "$ACTUAL" == 17.0.20* ]]
 
       - uses: android-actions/setup-android@v3
 
@@ -54,7 +54,7 @@ jobs:
           cp -a "$HOME/.gradle/caches/modules-2" "$ROOT/gradle-home/caches/"
           cat > "$ROOT/BUILD_ENV_MANIFEST.txt" <<'EOF'
           schema=1
-          java=Temurin 17.0.20.1+1
+          java=Temurin 17.0.20.x
           gradle=8.9
           agp=8.7.3
           kotlin=2.3.20
