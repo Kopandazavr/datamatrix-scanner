@@ -1,51 +1,86 @@
-name: Export deterministic build core
+name: Export deterministic build environment
 
 on:
   push:
     branches: [dms-buildenv-export]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export-core:
+  export-build-env:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
           check-latest: false
+
+      - name: Verify canonical JDK
+        run: |
+          set -euo pipefail
+          ACTUAL="$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.runtime.version = //p' | head -1)"
+          echo "java.runtime.version=$ACTUAL"
+          test "$ACTUAL" = "17.0.20.1+1"
+
       - uses: android-actions/setup-android@v3
+
       - name: Install pinned Android SDK
         run: |
           set -euo pipefail
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
-      - name: Materialize pinned Gradle Wrapper distribution
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;34.0.0"
+
+      - name: Materialize pinned Gradle and dependency modules
         run: |
           set -euo pipefail
           chmod +x gradlew
           ./gradlew --version
-      - name: Package canonical build core
+          ./gradlew --no-daemon testDebugUnitTest assembleDebug --stacktrace
+
+      - name: Package portable offline build environment
         run: |
           set -euo pipefail
           ROOT=/tmp/dms-build-env-core-v1
-          mkdir -p "$ROOT/jdk17" "$ROOT/android-sdk/platforms" "$ROOT/android-sdk/build-tools" "$ROOT/gradle-home/wrapper/dists"
+          mkdir -p "$ROOT/jdk17" "$ROOT/android-sdk/platforms" "$ROOT/android-sdk/build-tools" "$ROOT/gradle-home/wrapper" "$ROOT/gradle-home/caches" "$ROOT/android-user-home"
           cp -a "$JAVA_HOME"/. "$ROOT/jdk17/"
           cp -a "$ANDROID_HOME/platforms/android-35" "$ROOT/android-sdk/platforms/"
-          cp -a "$ANDROID_HOME/build-tools/35.0.0" "$ROOT/android-sdk/build-tools/"
+          cp -a "$ANDROID_HOME/build-tools/34.0.0" "$ROOT/android-sdk/build-tools/"
           cp -a "$ANDROID_HOME/platform-tools" "$ROOT/android-sdk/"
           if [ -d "$ANDROID_HOME/licenses" ]; then cp -a "$ANDROID_HOME/licenses" "$ROOT/android-sdk/"; fi
-          cp -a "$HOME/.gradle/wrapper/dists/gradle-8.9-bin" "$ROOT/gradle-home/wrapper/dists/"
-          "$ROOT/jdk17/bin/java" -version 2>&1 | tee "$ROOT/java-version.txt"
-          "$ROOT/gradle-home/wrapper/dists/gradle-8.9-bin"/*/gradle-8.9/bin/gradle --version | tee "$ROOT/gradle-version.txt"
-          tar -C /tmp -czf /tmp/dms-build-env-core-v1-linux-x64.tar.gz dms-build-env-core-v1
-          sha256sum /tmp/dms-build-env-core-v1-linux-x64.tar.gz | tee /tmp/dms-build-env-core-v1-linux-x64.sha256
+          cp -a "$HOME/.gradle/wrapper/dists" "$ROOT/gradle-home/wrapper/"
+          cp -a "$HOME/.gradle/caches/modules-2" "$ROOT/gradle-home/caches/"
+          cat > "$ROOT/BUILD_ENV_MANIFEST.txt" <<'EOF'
+          schema=1
+          java=Temurin 17.0.20.1+1
+          gradle=8.9
+          agp=8.7.3
+          kotlin=2.3.20
+          compileSdk=35
+          buildTools=34.0.0
+          EOF
+          tar -I 'gzip -1' -cf /tmp/datamatrix-scanner-build-env-v1-linux-x64.tar.gz -C /tmp dms-build-env-core-v1
+          sha256sum /tmp/datamatrix-scanner-build-env-v1-linux-x64.tar.gz | tee /tmp/datamatrix-scanner-build-env-v1-linux-x64.sha256
+
       - uses: actions/upload-artifact@v4
         with:
-          name: dms-build-env-core-v1-linux-x64
+          name: datamatrix-scanner-build-env-v1-linux-x64
           path: |
-            /tmp/dms-build-env-core-v1-linux-x64.tar.gz
-            /tmp/dms-build-env-core-v1-linux-x64.sha256
+            /tmp/datamatrix-scanner-build-env-v1-linux-x64.tar.gz
+            /tmp/datamatrix-scanner-build-env-v1-linux-x64.sha256
           retention-days: 90
+
+      - name: Publish durable infrastructure release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete dms-build-env-v1 --cleanup-tag --yes || true
+          gh release create dms-build-env-v1 \
+            /tmp/datamatrix-scanner-build-env-v1-linux-x64.tar.gz \
+            /tmp/datamatrix-scanner-build-env-v1-linux-x64.sha256 \
+            --target "$GITHUB_SHA" \
+            --title "Data Matrix Scanner — build environment v1" \
+            --notes "Portable Linux x86_64 offline build environment. Source of truth for app code remains the canonical Google Drive snapshot. Restore this archive, set DMS_BUILD_ENV_ROOT, then use bash ./build.sh doctor / verify. Keystore is not included."
