@@ -1,6 +1,7 @@
 package com.kopandazavr.datamatrixscanner.scanner
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -61,5 +62,24 @@ class RecoveryRegionTest {
         assertEquals(.6f, box.points[2].x, .001f)
         assertEquals(.625f, box.points[2].y, .001f)
         assertEquals(1.25f, box.imageAspect, .001f)
+    }
+
+    @Test fun centeredCropGeometryKeepsEdgeCandidateAtVirtualCenter() {
+        val region = RecoveryRegion(4f, 200f, 44f, 240f)
+        val geometry = requireNotNull(region.centeredCropGeometry(1088, 1088, .40f))
+        val localCenterX = region.centerX - geometry.originX
+        val localCenterY = region.centerY - geometry.originY
+        assertEquals(geometry.side / 2f, localCenterX, 1f)
+        assertEquals(geometry.side / 2f, localCenterY, 1f)
+        assertTrue(geometry.originX < 0)
+        assertTrue(geometry.edgePadded)
+    }
+
+    @Test fun centeredCropGeometryDoesNotShiftInteriorCandidate() {
+        val region = RecoveryRegion(400f, 400f, 500f, 500f)
+        val geometry = requireNotNull(region.centeredCropGeometry(1088, 1088, .40f))
+        assertFalse(geometry.edgePadded)
+        assertEquals(geometry.side / 2f, region.centerX - geometry.originX, 1f)
+        assertEquals(geometry.side / 2f, region.centerY - geometry.originY, 1f)
     }
 }

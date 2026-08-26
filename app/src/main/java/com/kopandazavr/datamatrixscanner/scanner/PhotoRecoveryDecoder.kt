@@ -107,12 +107,8 @@ class PhotoRecoveryDecoder : AutoCloseable {
         region: RecoveryRegion,
         found: LinkedHashMap<String, DecodedDataMatrix>
     ) {
-        val cropRegion = region.paddedSquare(
-            original.width,
-            original.height,
-            CANDIDATE_CROP_PADDING
-        )
-        val candidate = crop(original, cropRegion) ?: return
+        // Keep Data Matrix at the exact ML input centre even near an image edge.
+        val candidate = centeredCandidateCrop(original, region, CANDIDATE_CROP_PADDING) ?: return
         try {
             val bases = buildList {
                 add(candidate to false)
@@ -198,7 +194,7 @@ class PhotoRecoveryDecoder : AutoCloseable {
                 googleResults.forEach { barcode ->
                     val points = barcodePoints(barcode)
                     regionFrom(points, offsetX, offsetY, scaleX, scaleY)?.let(proposals::add)
-                    val bytes = barcode.rawBytes
+                    val bytes = decodedBarcodeBytes(barcode.rawBytes, barcode.rawValue)
                     if (barcode.format == Barcode.FORMAT_DATA_MATRIX && bytes != null && points.isNotEmpty()) {
                         val isGs1 = looksLikeGs1(bytes)
                         putDecoded(
@@ -245,7 +241,7 @@ class PhotoRecoveryDecoder : AutoCloseable {
             contentType = if (symbology == "]d2") "GS1" else "TEXT",
             box = DetectionBox(
                 points = normalized,
-                key = bytes.contentHashCode().toString(),
+                key = Base64.encodeToString(bytes, Base64.NO_WRAP),
                 imageAspect = bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1)
             )
         )
@@ -274,7 +270,7 @@ class PhotoRecoveryDecoder : AutoCloseable {
             contentType = contentType,
             box = DetectionBox(
                 points = normalized,
-                key = bytes.contentHashCode().toString(),
+                key = Base64.encodeToString(bytes, Base64.NO_WRAP),
                 imageAspect = width.toFloat() / height.coerceAtLeast(1)
             )
         )
@@ -302,6 +298,26 @@ class PhotoRecoveryDecoder : AutoCloseable {
             corners = mapped
         )
     }
+
+    private fun centeredCandidateCrop(source: Bitmap, region: RecoveryRegion, padding: Float): Bitmap? = runCatching {
+        val geometry = region.centeredCropGeometry(source.width, source.height, padding) ?: return@runCatching null
+        val output = Bitmap.createBitmap(geometry.side, geometry.side, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        canvas.drawColor(Color.WHITE)
+        val dstLeft = (geometry.sourceLeft - geometry.originX).toFloat()
+        val dstTop = (geometry.sourceTop - geometry.originY).toFloat()
+        canvas.drawBitmap(
+            source,
+            Rect(geometry.sourceLeft, geometry.sourceTop, geometry.sourceRight, geometry.sourceBottom),
+            android.graphics.RectF(
+                dstLeft, dstTop,
+                dstLeft + geometry.sourceRight - geometry.sourceLeft,
+                dstTop + geometry.sourceBottom - geometry.sourceTop
+            ),
+            Paint(Paint.FILTER_BITMAP_FLAG)
+        )
+        output
+    }.getOrNull()
 
     private fun crop(source: Bitmap, region: RecoveryRegion): Bitmap? = runCatching {
         val left = region.left.toInt().coerceIn(0, source.width - 1)

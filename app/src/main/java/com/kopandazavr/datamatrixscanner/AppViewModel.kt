@@ -2,6 +2,7 @@ package com.kopandazavr.datamatrixscanner
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
@@ -10,6 +11,7 @@ import android.os.VibratorManager
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.core.content.pm.PackageInfoCompat
 import com.kopandazavr.datamatrixscanner.data.CodeRecord
 import com.kopandazavr.datamatrixscanner.data.CodeRepository
 import com.kopandazavr.datamatrixscanner.data.RecordStatus
@@ -22,7 +24,9 @@ import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
 import com.kopandazavr.datamatrixscanner.scanner.PhotoRecoveryDecoder
 import com.kopandazavr.datamatrixscanner.scanner.ScanEnhancementMode
+import com.kopandazavr.datamatrixscanner.scanner.suppressOverlappingPresentationBoxes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -30,13 +34,16 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.ConcurrentHashMap
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
+    val debugLogger = PipelineDebugLogger(application.applicationContext)
+    internal val statistics = ScannerStatisticsStore(application.applicationContext)
+    internal val debugMarkers = DebugMarkerStore(application.applicationContext)
+    private val debugArchiveExporter = DebugArchiveExporter(application.applicationContext, debugLogger, statistics, debugMarkers)
     private val repository = CodeRepository(application)
     private val prefs = application.getSharedPreferences("scanner_preferences", 0)
     private val scanHapticVibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -47,6 +54,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
     private val scanMutex = Mutex()
     private val photoDecoder = PhotoRecoveryDecoder()
+    private val performanceBenchmark = ForegroundPerformanceBenchmark(application.applicationContext, debugLogger)
+    private var performanceBenchmarkJob: Job? = null
 
     // Decoders run in parallel (live ZXing, live candidate ML Kit and manual rescue).
     // Never let a rare second symbol be overwritten by the next repeated frame of
@@ -64,7 +73,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
     private val detectionCache = ConcurrentHashMap<String, DetectionHighlight>()
+    private val decodedStatisticsAt = ConcurrentHashMap<String, Long>()
 
+    private val _debugEnabled = MutableStateFlow(prefs.getBoolean("debug_enabled", false))
+    val debugEnabled: StateFlow<Boolean> = _debugEnabled.asStateFlow()
     private val _section = MutableStateFlow(RecordStatus.ACTIVE)
     val section: StateFlow<RecordStatus> = _section.asStateFlow()
     private val _records = MutableStateFlow<List<CodeRecord>>(emptyList())
@@ -89,6 +101,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val scanEnhancementMode: StateFlow<ScanEnhancementMode> = _scanEnhancementMode.asStateFlow()
     private val _batchId = MutableStateFlow(prefs.getLong("batch_id", 1L))
     val batchId: StateFlow<Long> = _batchId.asStateFlow()
+    private val _performanceBenchmarkState = MutableStateFlow<PerformanceBenchmarkState>(PerformanceBenchmarkState.Idle)
+    internal val performanceBenchmarkState: StateFlow<PerformanceBenchmarkState> = _performanceBenchmarkState.asStateFlow()
     private var boxGeneration = 0L
 
     init {
@@ -110,23 +124,59 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            potentialFrames.collectLatest { potential ->
-                _potentialBoxes.value = potential.map { it.copy(highlight = DetectionHighlight.POTENTIAL) }
-                publishBoxes()
-                delay(420)
-                _potentialBoxes.value = emptyList()
+            potentialFrames.collect { incoming ->
+                val candidates = incoming.map { it.copy(highlight = DetectionHighlight.POTENTIAL) }
+                _potentialBoxes.value = if (_debugEnabled.value) {
+                    candidates.filterNot(DetectionBox::stableCandidate)
+                } else {
+                    candidates.filter(DetectionBox::stableCandidate)
+                }
                 publishBoxes()
             }
         }
     }
 
+    fun setDebugEnabled(enabled: Boolean) {
+        if (_debugEnabled.value == enabled) return
+        debugLogger.log("UI_EVENT", "action" to if (enabled) "debug_on" else "debug_off")
+        if (!enabled && debugLogger.isRecording) debugLogger.stopSession("debug_off")
+        _debugEnabled.value = enabled
+        prefs.edit().putBoolean("debug_enabled", enabled).apply()
+        _potentialBoxes.value = emptyList()
+        publishBoxes()
+    }
+
+    fun toggleDebug() = setDebugEnabled(!_debugEnabled.value)
+
+    fun logUiEvent(action: String, vararg fields: Pair<String, Any?>) {
+        debugLogger.log("UI_EVENT", linkedMapOf("action" to action, *fields))
+    }
+
     fun setSection(value: RecordStatus) {
+        debugLogger.log("UI_EVENT", "action" to "section", "value" to value.name)
         _section.value = value
         refresh()
     }
 
     fun onDecoded(items: List<DecodedDataMatrix>) {
         if (items.isEmpty()) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        items.forEach { item ->
+            val statsKey = "${Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)}:${item.source}"
+            val previous = decodedStatisticsAt[statsKey]
+            if (previous == null || now - previous >= 450L) {
+                decodedStatisticsAt[statsKey] = now
+                statistics.recordDecoded(
+                    box = item.box,
+                    lensDistance = item.actualFocusDistance,
+                    targetSharpness = item.targetSharpness,
+                    stationary = item.focusStationary == true,
+                    episodeId = _batchId.value,
+                    payloadId = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP),
+                    passiveHit = !item.focusTriggered
+                )
+            }
+        }
         synchronized(pendingDecodedLock) {
             items.forEach { item ->
                 val key = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)
@@ -142,7 +192,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onPotentialBoxes(boxes: List<DetectionBox>) {
-        if (boxes.isNotEmpty()) potentialFrames.tryEmit(boxes)
+        potentialFrames.tryEmit(boxes)
     }
 
     private suspend fun processDecodedFrame(items: List<DecodedDataMatrix>) {
@@ -156,7 +206,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             var activatedRecord = false
             items.forEach { item ->
                 val cacheKey = Base64.encodeToString(item.rawBytes, Base64.NO_WRAP)
-                val highlight = detectionCache[cacheKey] ?: run {
+                val cachedHighlight = detectionCache[cacheKey]
+                if (cachedHighlight != null) {
+                    debugLogger.log(
+                        "DECODE",
+                        "frame" to item.frameId,
+                        "source" to item.source,
+                        "id" to PipelineDebugLogger.shortPayloadId(item.rawBytes),
+                        "route" to "IgnoredActiveCached",
+                        "duplicate" to if (cachedHighlight == DetectionHighlight.DUPLICATE) 1 else 0
+                    )
+                }
+                val highlight = cachedHighlight ?: run {
                     val outcome = repository.scan(
                         rawBytes = item.rawBytes,
                         isGs1 = item.isGs1,
@@ -167,6 +228,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         capturedFrame = item.capturedFrame,
                         detectionBox = item.box
                     )
+                    val route = when (outcome) {
+                        is ScanOutcome.New -> "New"
+                        is ScanOutcome.Restored -> "Restored"
+                        is ScanOutcome.IgnoredActive -> "IgnoredActive"
+                    }
                     val resolved = when (outcome) {
                         is ScanOutcome.New -> {
                             changed = true
@@ -184,6 +250,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             if (outcome.record.isDuplicate) DetectionHighlight.DUPLICATE else DetectionHighlight.ACTIVE
                         }
                     }
+                    debugLogger.log(
+                        "DECODE",
+                        "frame" to item.frameId,
+                        "source" to item.source,
+                        "id" to PipelineDebugLogger.shortPayloadId(item.rawBytes),
+                        "route" to route,
+                        "duplicate" to if (resolved == DetectionHighlight.DUPLICATE) 1 else 0
+                    )
                     detectionCache[cacheKey] = resolved
                     resolved
                 }
@@ -233,10 +307,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun publishBoxes() {
-        _boxes.value = _potentialBoxes.value + _confirmedBoxes.value
+        val merged = _potentialBoxes.value + _confirmedBoxes.value
+        _boxes.value = if (_debugEnabled.value) merged else suppressOverlappingPresentationBoxes(merged)
     }
 
     fun nextBatch() {
+        debugLogger.log("UI_EVENT", "action" to "next_batch", "from" to _batchId.value)
         _batchId.value += 1
         prefs.edit().putLong("batch_id", _batchId.value).apply()
         _setCount.value = 0
@@ -249,6 +325,58 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _scanEnhancementMode.value = mode
         prefs.edit().putString("scan_enhancement_mode", mode.name).apply()
     }
+
+    fun startPerformanceBenchmark(cameraSnapshot: Bitmap?) {
+        if (performanceBenchmarkJob?.isActive == true) {
+            cameraSnapshot?.recycle()
+            return
+        }
+        debugLogger.log("BENCH_START", "cameraSnapshot" to if (cameraSnapshot != null) 1 else 0)
+        val packageInfo = getApplication<Application>().packageManager.getPackageInfo(getApplication<Application>().packageName, 0)
+        val pipelineVersion = "${packageInfo.versionName}/${PackageInfoCompat.getLongVersionCode(packageInfo)}"
+        performanceBenchmarkJob = viewModelScope.launch(Dispatchers.Default) {
+            _performanceBenchmarkState.value = PerformanceBenchmarkState.Running("prepare", 0f, 0)
+            runCatching {
+                performanceBenchmark.run(
+                    cameraSnapshot = cameraSnapshot,
+                    pipelineVersion = pipelineVersion,
+                    onProgress = { _performanceBenchmarkState.value = it }
+                )
+            }.onSuccess { result ->
+                statistics.recordPerformanceBenchmark(result)
+                viewModelScope.launch(Dispatchers.IO) {
+                    debugArchiveExporter.storeLastBenchmark(result.format(BenchmarkViewMode.FULL))
+                }
+                _performanceBenchmarkState.value = PerformanceBenchmarkState.Completed(result)
+                debugLogger.log(
+                    "BENCH_END",
+                    "recommendedWorkers" to result.recommendedWorkers,
+                    "recommendationValid" to if (result.recommendationValid) 1 else 0,
+                    "fallbackReason" to result.recommendationFallbackReason,
+                    "sustainedJobsPerSec" to result.sustainedJobsPerSecond,
+                    "cancelled" to if (result.cancelled) 1 else 0
+                )
+            }.onFailure { error ->
+                cameraSnapshot?.takeIf { !it.isRecycled }?.recycle()
+                _performanceBenchmarkState.value = PerformanceBenchmarkState.Failed(error.javaClass.simpleName)
+                debugLogger.error("benchmark", "error" to error.javaClass.simpleName)
+            }
+        }
+    }
+
+    fun cancelPerformanceBenchmark() {
+        performanceBenchmark.cancel()
+        debugLogger.log("BENCH_CANCEL")
+    }
+
+    fun dismissPerformanceBenchmarkResult() {
+        if (_performanceBenchmarkState.value !is PerformanceBenchmarkState.Running) {
+            _performanceBenchmarkState.value = PerformanceBenchmarkState.Idle
+        }
+    }
+
+    internal suspend fun buildDebugArchive(runtime: DebugArchiveRuntimeSnapshot): java.io.File =
+        debugArchiveExporter.build(runtime)
 
     fun setScanned(id: Long, scanned: Boolean, after: (() -> Unit)? = null) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -345,7 +473,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        performanceBenchmark.cancel()
         photoDecoder.close()
+        debugLogger.close()
+        statistics.close()
         super.onCleared()
     }
 }

@@ -14,8 +14,8 @@ android {
         applicationId = "com.kopandazavr.datamatrixscanner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 23
-        versionName = "0.4.9"
+        versionCode = 35
+        versionName = "0.6.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

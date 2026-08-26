@@ -1,20 +1,26 @@
+@file:OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+
 package com.kopandazavr.datamatrixscanner
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Size
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
-import androidx.camera.view.CameraController
-import androidx.camera.view.LifecycleCameraController
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -25,6 +31,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +50,7 @@ import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -54,13 +62,22 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.QrCode2
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.ZoomIn
+import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.BottomAppBar
 import androidx.compose.material3.Button
@@ -93,8 +110,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.draw.clipToBounds
@@ -105,11 +122,14 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.platform.ViewConfiguration
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -117,6 +137,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.kopandazavr.datamatrixscanner.data.CodeRecord
 import com.kopandazavr.datamatrixscanner.data.RecordStatus
@@ -126,12 +147,14 @@ import com.kopandazavr.datamatrixscanner.data.StoredScanFrame
 import com.kopandazavr.datamatrixscanner.scanner.DataMatrixAnalyzer
 import com.kopandazavr.datamatrixscanner.scanner.DetectionBox
 import com.kopandazavr.datamatrixscanner.scanner.DetectionHighlight
-import com.kopandazavr.datamatrixscanner.scanner.ScanEnhancementMode
+import com.kopandazavr.datamatrixscanner.scanner.PipelineDiagnostics
+import com.kopandazavr.datamatrixscanner.scanner.axisAlignedPresentationRect
 import com.kopandazavr.datamatrixscanner.ui.DataMatrixImage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -148,7 +171,8 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class AppMode { LIST, VIEWER, RECOVERY }
+private enum class AppMode { LIST, VIEWER, RECOVERY, LOGS, STATISTICS }
+private enum class DebugLogView { RECORDING, SESSION }
 private data class ViewerState(val ids: List<Long>, val index: Int, val source: RecordStatus)
 private val EmbeddedCameraPreviewHeight = 348.dp
 
@@ -165,26 +189,63 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
     LaunchedEffect(Unit) { if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA) }
 
     var mode by remember { mutableStateOf(AppMode.LIST) }
+    var debugLogView by remember { mutableStateOf(DebugLogView.RECORDING) }
     var cameraFullscreen by remember { mutableStateOf(false) }
     var viewer by remember { mutableStateOf<ViewerState?>(null) }
-    val analyzer = remember { DataMatrixAnalyzer(vm::onDecoded, vm::onPotentialBoxes) }
+    val focusMetadata = remember(vm) { FocusLensMetadataMonitor(vm.debugLogger, vm.statistics) }
+    val analyzer = remember(vm, focusMetadata) {
+        DataMatrixAnalyzer(
+            vm::onDecoded,
+            vm::onPotentialBoxes,
+            vm.debugLogger,
+            vm.statistics,
+            focusMetadata
+        )
+    }
     val enhancementMode by vm.scanEnhancementMode.collectAsState()
     val executor = remember { Executors.newSingleThreadExecutor() }
-    val controller = remember(permissionGranted) {
-        if (!permissionGranted) null else LifecycleCameraController(context).apply {
-            cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-            imageAnalysisBackpressureStrategy = ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST
-            setImageAnalysisTargetSize(CameraController.OutputSize(Size(1280, 720)))
-            imageCaptureMode = ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
-            setEnabledUseCases(CameraController.IMAGE_ANALYSIS or CameraController.IMAGE_CAPTURE)
-            setImageAnalysisAnalyzer(executor, analyzer)
-            bindToLifecycle(lifecycleOwner)
-        }
+    val preview = remember { Preview.Builder().build() }
+    val imageCapture = remember {
+        ImageCapture.Builder()
+            .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+            .build()
     }
-    DisposableEffect(controller) {
+    val imageAnalysis = remember(focusMetadata) {
+        val builder = ImageAnalysis.Builder()
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setTargetResolution(Size(1280, 720))
+        Camera2Interop.Extender(builder).setSessionCaptureCallback(focusMetadata.captureCallback)
+        builder.build()
+    }
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    DisposableEffect(imageAnalysis, analyzer, executor) {
+        imageAnalysis.setAnalyzer(executor, analyzer)
+        onDispose { imageAnalysis.clearAnalyzer() }
+    }
+    DisposableEffect(permissionGranted, lifecycleOwner, preview, imageCapture, imageAnalysis) {
+        var boundProvider: ProcessCameraProvider? = null
+        val providerFuture = if (permissionGranted) ProcessCameraProvider.getInstance(context) else null
+        val listener = Runnable {
+            val provider = runCatching { providerFuture?.get() }.getOrNull() ?: return@Runnable
+            runCatching {
+                provider.unbindAll()
+                camera = provider.bindToLifecycle(
+                    lifecycleOwner,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    imageAnalysis,
+                    imageCapture
+                )
+                boundProvider = provider
+            }.onFailure {
+                camera = null
+                vm.debugLogger.error("camera_bind_failed", "error" to it.javaClass.simpleName)
+            }
+        }
+        providerFuture?.addListener(listener, ContextCompat.getMainExecutor(context))
         onDispose {
-            controller?.clearImageAnalysisAnalyzer()
-            controller?.unbind()
+            camera = null
+            boundProvider?.unbind(preview, imageAnalysis, imageCapture)
         }
     }
     DisposableEffect(Unit) {
@@ -194,36 +255,55 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
         }
     }
     analyzer.fullScreen = mode == AppMode.LIST && cameraFullscreen
+    analyzer.active = mode == AppMode.LIST
     analyzer.enhancementMode = enhancementMode
-    LaunchedEffect(mode, controller) {
-        if (mode == AppMode.LIST) {
-            controller?.setImageAnalysisAnalyzer(executor, analyzer)
-        } else {
-            controller?.clearImageAnalysisAnalyzer()
-        }
-    }
     val focusController = rememberCameraFocusController(
         active = mode == AppMode.LIST,
-        controller = controller,
-        analyzer = analyzer
+        camera = camera,
+        analyzer = analyzer,
+        metadata = focusMetadata,
+        statistics = vm.statistics,
+        logger = vm.debugLogger
     )
 
     when (mode) {
         AppMode.LIST -> ListScreen(
             vm = vm,
-            controller = controller,
+            preview = preview,
+            imageCapture = imageCapture,
+            cameraAvailable = camera != null,
             permissionGranted = permissionGranted,
             fullscreen = cameraFullscreen,
-            enhancementMode = enhancementMode,
             focusController = focusController,
-            onToggleFullscreen = { cameraFullscreen = !cameraFullscreen },
+            focusMetadata = focusMetadata,
+            onToggleFullscreen = {
+                cameraFullscreen = !cameraFullscreen
+                vm.logUiEvent("camera_fullscreen", "value" to if (cameraFullscreen) 1 else 0)
+            },
+            analyzer = analyzer,
             onRecovery = {
                 cameraFullscreen = false
+                vm.logUiEvent("recovery_open")
                 mode = AppMode.RECOVERY
             },
-            onTargetedRescue = analyzer::requestTargetedRescue,
-            onEnhancementMode = vm::setScanEnhancementMode,
+            onLogs = {
+                cameraFullscreen = false
+                if (vm.debugLogger.isRecording) vm.debugLogger.stopSession("open_recording_logs")
+                debugLogView = DebugLogView.RECORDING
+                mode = AppMode.LOGS
+            },
+            onSessionLogs = {
+                cameraFullscreen = false
+                if (vm.debugLogger.isRecording) vm.debugLogger.stopSession("open_session_logs")
+                debugLogView = DebugLogView.SESSION
+                mode = AppMode.LOGS
+            },
+            onStatistics = {
+                cameraFullscreen = false
+                mode = AppMode.STATISTICS
+            },
             onOpenViewer = { id, ids, source ->
+                vm.logUiEvent("viewer_open", "record" to id)
                 viewer = ViewerState(ids, ids.indexOf(id).coerceAtLeast(0), source)
                 cameraFullscreen = false
                 mode = AppMode.VIEWER
@@ -238,6 +318,15 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
             vm = vm,
             onBack = { mode = AppMode.LIST }
         )
+        AppMode.LOGS -> DebugLogsScreen(
+            logger = vm.debugLogger,
+            view = debugLogView,
+            onBack = { mode = AppMode.LIST }
+        )
+        AppMode.STATISTICS -> StatisticsScreen(
+            statistics = vm.statistics,
+            onBack = { mode = AppMode.LIST }
+        )
     }
 }
 
@@ -245,15 +334,19 @@ private fun ScannerApp(vm: AppViewModel = viewModel()) {
 @Composable
 private fun ListScreen(
     vm: AppViewModel,
-    controller: LifecycleCameraController?,
+    preview: Preview,
+    imageCapture: ImageCapture,
+    cameraAvailable: Boolean,
     permissionGranted: Boolean,
     fullscreen: Boolean,
-    enhancementMode: ScanEnhancementMode,
     focusController: CameraFocusController,
+    focusMetadata: FocusLensMetadataMonitor,
+    analyzer: DataMatrixAnalyzer,
     onToggleFullscreen: () -> Unit,
     onRecovery: () -> Unit,
-    onTargetedRescue: () -> Unit,
-    onEnhancementMode: (ScanEnhancementMode) -> Unit,
+    onLogs: () -> Unit,
+    onSessionLogs: () -> Unit,
+    onStatistics: () -> Unit,
     onOpenViewer: (Long, List<Long>, RecordStatus) -> Unit
 ) {
     val section by vm.section.collectAsState()
@@ -261,32 +354,159 @@ private fun ListScreen(
     val boxes by vm.boxes.collectAsState()
     val count by vm.setCount.collectAsState()
     val currentBatchId by vm.batchId.collectAsState()
+    val debugEnabled by vm.debugEnabled.collectAsState()
+    val diagnostics by analyzer.diagnostics.collectAsState()
+    val logCount by vm.debugLogger.lineCount.collectAsState()
+    val activeLogSession by vm.debugLogger.activeSessionId.collectAsState()
+    val benchmarkState by vm.performanceBenchmarkState.collectAsState()
+    val enhancementMode by vm.scanEnhancementMode.collectAsState()
     val context = LocalContext.current
+    val appVersionLabel = remember(context) {
+        runCatching {
+            val info = context.packageManager.getPackageInfo(context.packageName, 0)
+            "${info.versionName ?: "?"} (${PackageInfoCompat.getLongVersionCode(info)})"
+        }.getOrDefault("?")
+    }
     val haptic = LocalHapticFeedback.current
+    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var menu by remember { mutableStateOf(false) }
-    var enhancementDialog by remember { mutableStateOf(false) }
     var focusModeDialog by remember { mutableStateOf(false) }
+    var benchmarkConfirm by remember { mutableStateOf(false) }
+    var benchmarkViewMode by remember { mutableStateOf(BenchmarkViewMode.SHORT) }
     var photoFlash by remember { mutableStateOf(false) }
     var selection by remember { mutableStateOf(RangeSelectionState()) }
     var eventRecord by remember { mutableStateOf<CodeRecord?>(null) }
     var events by remember { mutableStateOf<List<ScanEvent>>(emptyList()) }
     var topBarHeightPx by remember { mutableStateOf(0) }
     val listState = rememberLazyListState()
+    val cameraPrefs = remember(context) { context.getSharedPreferences("camera_ui_preferences", 0) }
+    var controlsMirrored by remember { mutableStateOf(cameraPrefs.getBoolean("controls_mirrored", false)) }
+    var previewZoomedIn by remember { mutableStateOf(cameraPrefs.getBoolean("preview_zoomed_in", true)) }
+    var heavyActive by remember { mutableStateOf(false) }
+    var heavyProgress by remember { mutableStateOf(0f) }
+    var debugArchiveBuilding by remember { mutableStateOf(false) }
+    val heavyHaptics = remember(context) { HeavyCycleHaptics(context) }
+
+    fun debugRuntimeSnapshot() = DebugArchiveRuntimeSnapshot(
+        debugEnabled = debugEnabled,
+        fullscreen = fullscreen,
+        previewZoomedIn = previewZoomedIn,
+        controlsMirrored = controlsMirrored,
+        enhancementMode = enhancementMode.name,
+        manualFocusMode = focusController.manualMode.name,
+        currentBatchId = currentBatchId,
+        recognizedCount = count,
+        cameraAvailable = cameraAvailable,
+        diagnostics = diagnostics,
+        focus = focusController.control,
+        focusMetadata = focusMetadata.latest()
+    )
+
+    fun createDebugMarker() {
+        if (!debugEnabled) return
+        val marker = vm.debugMarkers.reserve()
+        haptic.performUiHaptic(UiHapticAction.DEBUG_MARKER)
+        vm.debugLogger.log(
+            "USER_MARKER",
+            "marker" to marker.id,
+            "sequence" to marker.sequence,
+            "uiFile" to marker.uiFileName,
+            "sourceFile" to marker.sourceFileName
+        )
+        val activity = context as? Activity
+        val runtime = debugRuntimeSnapshot().format()
+        scope.launch {
+            val uiCapture = async {
+                activity?.let { vm.debugMarkers.captureUi(it, marker) } ?: "missing:no_activity"
+            }
+            val sourceSnapshot = analyzer.awaitSnapshot(900L)
+            val sourceStatus = vm.debugMarkers.saveSource(marker, sourceSnapshot)
+            val uiStatus = uiCapture.await()
+            vm.debugMarkers.finalize(
+                marker,
+                DebugMarkerFinalize(
+                    uiStatus = uiStatus,
+                    sourceStatus = sourceStatus,
+                    frameId = sourceSnapshot?.frameId,
+                    frameElapsedMs = sourceSnapshot?.frameElapsedMs,
+                    sensorTimestampNs = sourceSnapshot?.sensorTimestampNs,
+                    runtimeState = runtime
+                )
+            )
+            vm.debugLogger.log(
+                "MARKER_ARTIFACT",
+                "marker" to marker.id,
+                "sequence" to marker.sequence,
+                "uiStatus" to uiStatus,
+                "sourceStatus" to sourceStatus,
+                "frame" to sourceSnapshot?.frameId,
+                "sensorTsNs" to sourceSnapshot?.sensorTimestampNs
+            )
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { heavyHaptics.cancel() }
+    }
+
+    LaunchedEffect(benchmarkState) {
+        analyzer.benchmarkPaused = benchmarkState is PerformanceBenchmarkState.Running
+    }
+
+    fun startHeavyCycle() {
+        if (heavyActive) return
+        heavyActive = true
+        heavyProgress = .02f
+        val cycleId = SystemClock.elapsedRealtime()
+        scope.launch {
+            heavyHaptics.start()
+            try {
+                vm.logUiEvent("boost_cycle_start", "cycle" to cycleId)
+                vm.debugLogger.log("HEAVY_STAGE", "cycle" to cycleId, "stage" to "evidence_window", "focusCommands" to 0)
+                heavyProgress = .18f
+                val result = analyzer.runBoost(cycleId, timeoutMs = 20_000L)
+                heavyProgress = .96f
+                heavyProgress = 1f
+                vm.debugLogger.log(
+                    "HEAVY_STAGE",
+                    "cycle" to cycleId,
+                    "stage" to "complete",
+                    "success" to if (result.completed > 0) 1 else 0,
+                    "submitted" to result.submitted,
+                    "decoded" to result.decoded,
+                    "reason" to result.reason,
+                    "focusCommands" to 0
+                )
+                delay(140L)
+            } catch (t: Throwable) {
+                vm.debugLogger.error("heavy_cycle_exception", "cycle" to cycleId, "error" to t.javaClass.simpleName)
+            } finally {
+                heavyHaptics.finish()
+                heavyActive = false
+                heavyProgress = 0f
+            }
+        }
+    }
 
     LaunchedEffect(section) { selection = RangeSelectionState() }
     LaunchedEffect(section, records.firstOrNull()?.id, records.firstOrNull()?.lastScanAt) {
         if (section == RecordStatus.ACTIVE && records.isNotEmpty()) listState.animateScrollToItem(0)
     }
-    androidx.activity.compose.BackHandler(enabled = fullscreen, onBack = onToggleFullscreen)
+    androidx.activity.compose.BackHandler(enabled = fullscreen) {
+        haptic.performUiHaptic(UiHapticAction.FULLSCREEN_TOGGLE)
+        onToggleFullscreen()
+    }
 
     Box(Modifier.fillMaxSize()) {
         if (!fullscreen) {
             Scaffold(
                 topBar = {
                     Column {
-                        TopAppBar(
-                            modifier = Modifier.onSizeChanged { topBarHeightPx = it.height },
+                        // Measure only the visible toolbar/debug area. The preview spacer below
+                        // reserves list space and must not be included in the camera Y offset.
+                        Column(Modifier.onSizeChanged { topBarHeightPx = it.height }) {
+                            TopAppBar(
                             title = { Text(section.title()) },
                             colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFFF8FAFC)),
                             actions = {
@@ -301,21 +521,141 @@ private fun ListScreen(
                                     IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, "Меню") }
                                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                                         DropdownMenuItem(
-                                            text = { Text("Восстановить из фото") },
-                                            onClick = { menu = false; onRecovery() }
+                                            text = { Text("Версия: $appVersionLabel") },
+                                            onClick = { },
+                                            enabled = false
                                         )
                                         DropdownMenuItem(
-                                            text = { Text("Усиление: ${enhancementMode.title}") },
-                                            onClick = { menu = false; enhancementDialog = true }
+                                            text = { Text("Восстановить из фото") },
+                                            onClick = { menu = false; if (!heavyActive) onRecovery() }
                                         )
                                         DropdownMenuItem(
                                             text = { Text("Ручной фокус: ${focusController.manualMode.title}") },
                                             onClick = { menu = false; focusModeDialog = true }
                                         )
+                                        DropdownMenuItem(
+                                            text = { Text(if (debugEnabled) "Отладка: вкл" else "Отладка: выкл") },
+                                            onClick = { menu = false; vm.toggleDebug() }
+                                        )
+                                        if (debugEnabled) {
+                                            DropdownMenuItem(
+                                                text = { Text("Логи записи") },
+                                                onClick = { menu = false; if (!heavyActive) onLogs() }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Логи сессии") },
+                                                onClick = { menu = false; if (!heavyActive) onSessionLogs() }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Статистика") },
+                                                onClick = {
+                                                    menu = false
+                                                    if (!heavyActive) {
+                                                        haptic.performUiHaptic(UiHapticAction.MENU_ACTION)
+                                                        onStatistics()
+                                                    }
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text(if (debugArchiveBuilding) "Отладочный архив…" else "Отладочный архив") },
+                                                enabled = !debugArchiveBuilding && !heavyActive,
+                                                onClick = {
+                                                    menu = false
+                                                    if (!debugArchiveBuilding && !heavyActive) {
+                                                        debugArchiveBuilding = true
+                                                        haptic.performUiHaptic(UiHapticAction.DEBUG_ARCHIVE)
+                                                        vm.debugLogger.log("DEBUG_ARCHIVE", "stage" to "start")
+                                                        val runtime = debugRuntimeSnapshot()
+                                                        scope.launch {
+                                                            runCatching { vm.buildDebugArchive(runtime) }
+                                                                .onSuccess { file ->
+                                                                    vm.debugLogger.log("DEBUG_ARCHIVE", "stage" to "ready", "file" to file.name, "size" to file.length())
+                                                                    shareDebugArchive(context, file)
+                                                                }
+                                                                .onFailure { error ->
+                                                                    vm.debugLogger.error("debug_archive", "error" to error.javaClass.simpleName)
+                                                                    Toast.makeText(context, "Не удалось собрать отладочный архив", Toast.LENGTH_LONG).show()
+                                                                }
+                                                            debugArchiveBuilding = false
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Очистить marker-снимки") },
+                                                enabled = !debugArchiveBuilding,
+                                                onClick = {
+                                                    menu = false
+                                                    haptic.performUiHaptic(UiHapticAction.LOG_CLEAR)
+                                                    scope.launch {
+                                                        val removed = vm.debugMarkers.clear()
+                                                        Toast.makeText(context, "Удалено файлов marker: $removed", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = { Text("Тест производительности") },
+                                                onClick = {
+                                                    menu = false
+                                                    if (!heavyActive && benchmarkState !is PerformanceBenchmarkState.Running) benchmarkConfirm = true
+                                                }
+                                            )
+                                        }
                                     }
                                 }
                             }
                         )
+                            if (debugEnabled) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .height(44.dp)
+                                        .background(Color(0xFFE2E8F0))
+                                ) {
+                                    val actionAlignment = if (controlsMirrored) Alignment.CenterStart else Alignment.CenterEnd
+                                    val infoAlignment = if (controlsMirrored) Alignment.CenterEnd else Alignment.CenterStart
+                                    IconButton(
+                                        onClick = {
+                                            haptic.performUiHaptic(UiHapticAction.LOG_PLAY_PAUSE)
+                                            if (activeLogSession == null) {
+                                                vm.debugLogger.startSession(
+                                                    "camera" to "back_1280x720",
+                                                    "focusMode" to focusController.manualMode.name,
+                                                    "roi" to "40",
+                                                    "pipeline" to "zxing+candidate_ml+heavy",
+                                                    "fullscreen" to if (fullscreen) 1 else 0
+                                                )
+                                            } else {
+                                                vm.debugLogger.stopSession("pause")
+                                            }
+                                        },
+                                        modifier = Modifier.align(actionAlignment).padding(horizontal = 6.dp).size(38.dp)
+                                    ) {
+                                        Icon(
+                                            if (activeLogSession == null) Icons.Default.PlayArrow else Icons.Default.Pause,
+                                            if (activeLogSession == null) "Запустить лог" else "Пауза"
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            haptic.performUiHaptic(UiHapticAction.LOG_CLEAR)
+                                            vm.debugLogger.clear()
+                                        },
+                                        modifier = Modifier.align(Alignment.Center).size(38.dp)
+                                    ) {
+                                        Icon(Icons.Default.DeleteSweep, "Очистить логи")
+                                    }
+                                    Text(
+                                        "$logCount · ${if (activeLogSession == null) "Pause" else "REC S#$activeLogSession"}",
+                                        modifier = Modifier.align(infoAlignment).padding(horizontal = 10.dp),
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (activeLogSession == null) Color.Gray else Color(0xFFB91C1C)
+                                    )
+                                }
+                            }
+                        }
                         Spacer(Modifier.height(EmbeddedCameraPreviewHeight))
                     }
                 },
@@ -356,7 +696,7 @@ private fun ListScreen(
                                 onClick = {
                                     selection = selection.toggle(record.id, records.map(CodeRecord::id))
                                 },
-                                onMatrix = { onOpenViewer(record.id, records.map(CodeRecord::id), section) },
+                                onMatrix = { if (!heavyActive) onOpenViewer(record.id, records.map(CodeRecord::id), section) },
                                 onStatus = {
                                     eventRecord = record
                                     vm.events(record.id) { events = it }
@@ -375,33 +715,69 @@ private fun ListScreen(
             Modifier.fillMaxWidth().height(EmbeddedCameraPreviewHeight).offset { IntOffset(0, topBarHeightPx) }
         }
         CameraPreview(
-            controller = controller,
+            preview = preview,
+            cameraAvailable = cameraAvailable,
             permissionGranted = permissionGranted,
             boxes = boxes,
             modifier = cameraModifier,
             fullscreen = fullscreen,
-            onClick = onToggleFullscreen,
-            onBack = onToggleFullscreen,
+            onClick = {
+                haptic.performUiHaptic(UiHapticAction.FULLSCREEN_TOGGLE)
+                onToggleFullscreen()
+            },
+            onBack = {
+                haptic.performUiHaptic(UiHapticAction.FULLSCREEN_TOGGLE)
+                onToggleFullscreen()
+            },
             onPhoto = {
-                val activeController = controller
-                if (activeController == null) {
-                    Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
-                } else {
-                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                    photoFlash = true
-                    scope.launch {
-                        delay(90L)
-                        photoFlash = false
-                    }
-                    saveCameraPhoto(context, activeController) { result ->
-                        Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
+                if (!heavyActive) {
+                    if (!cameraAvailable) {
+                        Toast.makeText(context, "Камера недоступна", Toast.LENGTH_SHORT).show()
+                    } else {
+                        vm.logUiEvent("photo")
+                        haptic.performUiHaptic(UiHapticAction.MENU_ACTION)
+                        photoFlash = true
+                        scope.launch {
+                            delay(90L)
+                            photoFlash = false
+                        }
+                        saveCameraPhoto(context, imageCapture) { result ->
+                            Toast.makeText(context, result, Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             },
-            onTargetedRescue = onTargetedRescue,
+            onHeavyCycle = ::startHeavyCycle,
+            heavyActive = heavyActive,
+            heavyProgress = heavyProgress,
             focusController = focusController,
             recognizedCount = count,
-            onNextBatch = vm::nextBatch
+            onNextBatch = {
+                if (!heavyActive) {
+                    haptic.performUiHaptic(UiHapticAction.NAVIGATION)
+                    vm.nextBatch()
+                }
+            },
+            onDebugMarker = if (debugEnabled) ::createDebugMarker else null,
+            debugEnabled = debugEnabled,
+            diagnostics = diagnostics,
+            controlsMirrored = controlsMirrored,
+            onSwapControls = {
+                haptic.performUiHaptic(UiHapticAction.CONTROL_SWAP)
+                controlsMirrored = !controlsMirrored
+                cameraPrefs.edit().putBoolean("controls_mirrored", controlsMirrored).apply()
+                vm.logUiEvent("controls_swap", "mirrored" to if (controlsMirrored) 1 else 0)
+            },
+            previewZoomedIn = previewZoomedIn,
+            onTogglePreviewZoom = {
+                haptic.performUiHaptic(UiHapticAction.ZOOM_TOGGLE)
+                previewZoomedIn = !previewZoomedIn
+                cameraPrefs.edit().putBoolean("preview_zoomed_in", previewZoomedIn).apply()
+                vm.logUiEvent(
+                    "preview_fit", "zoomedIn" to if (previewZoomedIn) 1 else 0,
+                    "fit" to if (previewZoomedIn) "height" else "width"
+                )
+            }
         )
         if (photoFlash) {
             Box(Modifier.fillMaxSize().background(Color.White))
@@ -423,17 +799,6 @@ private fun ListScreen(
         }
     }
 
-    if (enhancementDialog) {
-        EnhancementModeDialog(
-            selected = enhancementMode,
-            onSelect = {
-                onEnhancementMode(it)
-                enhancementDialog = false
-            },
-            onDismiss = { enhancementDialog = false }
-        )
-    }
-
     if (focusModeDialog) {
         ManualFocusModeDialog(
             selected = focusController.manualMode,
@@ -444,44 +809,76 @@ private fun ListScreen(
             onDismiss = { focusModeDialog = false }
         )
     }
-}
 
-@Composable
-private fun EnhancementModeDialog(
-    selected: ScanEnhancementMode,
-    onSelect: (ScanEnhancementMode) -> Unit,
-    onDismiss: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Усиление распознавания") },
-        text = {
-            Column {
-                Text("Оба движка сканируют весь видимый кадр. Кнопка со спидометром запускает усиленный проход; её можно удерживать для повторных проходов.")
-                Spacer(Modifier.height(10.dp))
-                ScanEnhancementMode.entries.forEach { mode ->
-                    Surface(
-                        onClick = { onSelect(mode) },
-                        color = if (selected == mode) Color(0xFFDDEAFE) else Color.Transparent,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            Modifier.padding(horizontal = 12.dp, vertical = 11.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(mode.title, Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                            if (mode != ScanEnhancementMode.OFF) {
-                                Text("${mode.decoderAttemptCount} попыток", color = Color.Gray)
-                            }
-                            if (selected == mode) Icon(Icons.Default.Check, null, tint = Color(0xFF2563EB))
+    if (benchmarkConfirm) {
+        AlertDialog(
+            onDismissRequest = { benchmarkConfirm = false },
+            title = { Text("Запустить тест производительности?") },
+            text = {
+                Text("Распознавание с камеры будет временно приостановлено. Тест прогревает декодеры, перебирает число worker-ов и выполняет sustained-проверку; устройство может нагреться.")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    benchmarkConfirm = false
+                    scope.launch {
+                        val snapshot = analyzer.awaitSnapshot(1_800L)?.bitmap
+                        analyzer.benchmarkPaused = true
+                        vm.startPerformanceBenchmark(snapshot)
+                    }
+                }) { Text("Запустить") }
+            },
+            dismissButton = { TextButton(onClick = { benchmarkConfirm = false }) { Text("Отмена") } }
+        )
+    }
+
+    when (val state = benchmarkState) {
+        is PerformanceBenchmarkState.Running -> AlertDialog(
+            onDismissRequest = { },
+            title = { Text("Тест производительности") },
+            text = {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(progress = { state.progress.coerceIn(0f, 1f) })
+                    Spacer(Modifier.height(12.dp))
+                    Text("${state.phase} · workers=${state.workers} · ${(state.progress * 100).toInt()}%")
+                }
+            },
+            confirmButton = {
+                if (state.cancellable) TextButton(onClick = vm::cancelPerformanceBenchmark) { Text("Остановить") }
+            }
+        )
+        is PerformanceBenchmarkState.Completed -> {
+            val representation = state.result.format(benchmarkViewMode)
+            AlertDialog(
+                onDismissRequest = vm::dismissPerformanceBenchmarkResult,
+                title = { Text("Результат теста") },
+                text = {
+                    Column {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { benchmarkViewMode = BenchmarkViewMode.SHORT }) { Text("Кратко") }
+                            TextButton(onClick = { benchmarkViewMode = BenchmarkViewMode.FULL }) { Text("Полностью") }
+                            TextButton(onClick = {
+                                clipboard.setText(AnnotatedString(representation))
+                                Toast.makeText(context, "Результат скопирован", Toast.LENGTH_SHORT).show()
+                            }) { Text("Копировать") }
+                        }
+                        SelectionContainer {
+                            Text(representation, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                         }
                     }
+                },
+                confirmButton = {
+                    TextButton(onClick = vm::dismissPerformanceBenchmarkResult) { Text("Закрыть") }
                 }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Закрыть") } }
-    )
+            )
+        }
+        is PerformanceBenchmarkState.Failed -> AlertDialog(
+            onDismissRequest = vm::dismissPerformanceBenchmarkResult,
+            title = { Text("Тест не завершён") },
+            text = { Text(state.message) },
+            confirmButton = { TextButton(onClick = vm::dismissPerformanceBenchmarkResult) { Text("Закрыть") } }
+        )
+        PerformanceBenchmarkState.Idle -> Unit
+    }
 }
 
 @Composable
@@ -495,7 +892,7 @@ private fun ManualFocusModeDialog(
         title = { Text("Ручной фокус") },
         text = {
             Column {
-                Text("Быстрый делает один аппаратный AF без дополнительной паузы. Точный после первого AF проверяет резкость в центре и при необходимости делает второй проход.")
+                Text("Обычное нажатие запускает выбранный ручной поиск дистанции линзы; удержание кнопки 500 мс запускает нативный автофокус по центральной области. На ручных позициях учитываются фактическое состояние линзы, резкость под прицелом и устойчивость областей Data Matrix.")
                 Spacer(Modifier.height(10.dp))
                 ManualFocusMode.entries.forEach { mode ->
                     Surface(
@@ -511,7 +908,7 @@ private fun ManualFocusModeDialog(
                             Column(Modifier.weight(1f)) {
                                 Text(mode.title, fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    if (mode == ManualFocusMode.FAST) "Ориентир: около 0,5 с, зависит от камеры" else "Приоритет максимальной устойчивости фокуса",
+                                    if (mode == ManualFocusMode.FAST) "Короткий ручной перебор без уточняющего прохода" else "Более плотный перебор + уточнение лучшей дистанции",
                                     color = Color.Gray,
                                     fontSize = 12.sp
                                 )
@@ -552,7 +949,8 @@ private fun SectionButton(status: RecordStatus, selected: Boolean, onClick: () -
 
 @Composable
 private fun CameraPreview(
-    controller: LifecycleCameraController?,
+    preview: Preview,
+    cameraAvailable: Boolean,
     permissionGranted: Boolean,
     boxes: List<DetectionBox>,
     modifier: Modifier,
@@ -560,50 +958,109 @@ private fun CameraPreview(
     onClick: () -> Unit,
     onBack: () -> Unit,
     onPhoto: (() -> Unit)? = null,
-    onTargetedRescue: (() -> Unit)? = null,
+    onHeavyCycle: (() -> Unit)? = null,
+    heavyActive: Boolean = false,
+    heavyProgress: Float = 0f,
     focusController: CameraFocusController? = null,
     recognizedCount: Int? = null,
-    onNextBatch: (() -> Unit)? = null
+    onNextBatch: (() -> Unit)? = null,
+    onDebugMarker: (() -> Unit)? = null,
+    debugEnabled: Boolean = false,
+    diagnostics: PipelineDiagnostics = PipelineDiagnostics(),
+    controlsMirrored: Boolean = false,
+    onSwapControls: (() -> Unit)? = null,
+    previewZoomedIn: Boolean = true,
+    onTogglePreviewZoom: (() -> Unit)? = null
 ) {
-    var enhancementActive by remember { mutableStateOf(false) }
     val cameraFrameModifier = modifier
         .clipToBounds()
         .background(Color.Black)
-        .then(
-            if (enhancementActive) Modifier.border(3.dp, Color(0xFF3B82F6)) else Modifier
-        )
+        .then(if (heavyActive) Modifier.border(3.dp, Color(0xFF3B82F6)) else Modifier)
+    var diagnosticNow by remember { mutableStateOf(SystemClock.elapsedRealtime()) }
+    var showDiagnosticsHelp by remember { mutableStateOf(false) }
+    LaunchedEffect(debugEnabled, diagnostics.totalJobs, diagnostics.updatedAtElapsedMs) {
+        diagnosticNow = SystemClock.elapsedRealtime()
+        while (debugEnabled && diagnostics.totalJobs > 0) {
+            delay(100L)
+            diagnosticNow = SystemClock.elapsedRealtime()
+        }
+    }
+    val liveDiagnosticAge = if (diagnostics.totalJobs > 0 && diagnostics.updatedAtElapsedMs > 0L) {
+        diagnostics.oldestFrameAgeMs + (diagnosticNow - diagnostics.updatedAtElapsedMs).coerceAtLeast(0L)
+    } else {
+        diagnostics.oldestFrameAgeMs
+    }
+
     BoxWithConstraints(cameraFrameModifier, contentAlignment = Alignment.Center) {
-        if (controller != null) {
-            // Keep the camera surface at one stable measured size. Resizing PreviewView
-            // makes CameraX renegotiate the surface and produces a visible black flash.
-            // Fullscreen is therefore only a render transform; the surrounding box clips
-            // the enlarged preview exactly like FILL_CENTER would at the fullscreen ratio.
-            val fullscreenScale = if (fullscreen) {
-                (maxHeight.value / EmbeddedCameraPreviewHeight.value).coerceAtLeast(1f)
-            } else {
-                1f
-            }
+        if (cameraAvailable) {
             AndroidView(
                 factory = { ctx -> PreviewView(ctx).apply {
                     implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                    scaleType = PreviewView.ScaleType.FILL_CENTER
-                    this.controller = controller
-                } },
-                update = { it.controller = controller },
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxWidth()
-                    .requiredHeight(EmbeddedCameraPreviewHeight)
-                    .graphicsLayer {
-                        transformOrigin = TransformOrigin.Center
-                        scaleX = fullscreenScale
-                        scaleY = fullscreenScale
+                    scaleType = when {
+                        fullscreen -> PreviewView.ScaleType.FIT_CENTER
+                        previewZoomedIn -> PreviewView.ScaleType.FILL_CENTER
+                        else -> PreviewView.ScaleType.FIT_CENTER
                     }
+                    preview.setSurfaceProvider(surfaceProvider)
+                } },
+                update = {
+                    it.scaleType = when {
+                        fullscreen -> PreviewView.ScaleType.FIT_CENTER
+                        previewZoomedIn -> PreviewView.ScaleType.FILL_CENTER
+                        else -> PreviewView.ScaleType.FIT_CENTER
+                    }
+                },
+                modifier = Modifier.align(Alignment.Center).then(
+                    if (fullscreen) Modifier.fillMaxSize()
+                    else Modifier.fillMaxWidth().requiredHeight(EmbeddedCameraPreviewHeight)
+                )
             )
-        } else Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
-        DetectionOverlay(boxes)
-        CameraAimOverlay(active = enhancementActive)
+        } else {
+            Text(if (permissionGranted) "Камера недоступна" else "Нужно разрешение камеры", color = Color.White)
+        }
+
+        DetectionOverlay(boxes, rawPotential = debugEnabled, fitContent = fullscreen || !previewZoomedIn)
+        CameraAimOverlay(active = heavyActive)
         Box(Modifier.fillMaxSize().clickable(onClick = onClick))
+
+        focusController?.takeIf { it.control.minimumFocusDistance != null }?.let { focus ->
+            FocusDistanceControl(
+                focus = focus,
+                fullscreen = fullscreen,
+                modifier = Modifier
+                    .align(if (controlsMirrored) Alignment.TopStart else Alignment.TopEnd)
+                    .then(if (fullscreen) Modifier.statusBarsPadding().navigationBarsPadding() else Modifier)
+                    .padding(horizontal = 8.dp, vertical = if (fullscreen) 64.dp else 8.dp)
+            )
+        }
+
+        if (debugEnabled) {
+            Surface(
+                onClick = { showDiagnosticsHelp = true },
+                modifier = Modifier
+                    .align(if (controlsMirrored) Alignment.TopStart else Alignment.TopEnd)
+                    .then(if (fullscreen) Modifier.statusBarsPadding() else Modifier)
+                    .padding(
+                        top = if (fullscreen) 64.dp else 8.dp,
+                        start = if (controlsMirrored) 62.dp else 0.dp,
+                        end = if (controlsMirrored) 0.dp else 62.dp
+                    ),
+                shape = RoundedCornerShape(8.dp),
+                color = Color.Black.copy(alpha = .62f),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = .32f))
+            ) {
+                Text(
+                    "jobs ${diagnostics.totalJobs} ($liveDiagnosticAge ms)\n" +
+                        "F:${diagnostics.fastJobs} ML:${diagnostics.mlPending}/${diagnostics.mlInFlight} H:${diagnostics.heavyPending}/${diagnostics.heavyInFlight}",
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    color = Color.White,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 13.sp
+                )
+            }
+        }
+
         if (fullscreen) {
             Row(
                 Modifier
@@ -616,106 +1073,321 @@ private fun CameraPreview(
                 IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад", tint = Color.White) }
                 Text("Распознано: ${recognizedCount ?: 0}", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
             }
+
             onNextBatch?.let { action ->
                 Button(
                     onClick = action,
                     modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().fillMaxWidth().padding(16.dp).height(64.dp),
                     shape = RoundedCornerShape(16.dp)
-                ) { Text("Следующий набор", fontSize = 20.sp) }
+                ) { Text("След. набор", fontSize = 20.sp) }
             }
+
             Row(
                 modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                onTargetedRescue?.let { action ->
-                    EnhancementHoldButton(
-                        fullscreen = true,
-                        onPulse = action,
-                        onActiveChange = { enhancementActive = it }
-                    )
+                Box(Modifier.size(62.dp), contentAlignment = Alignment.Center) {
+                    onHeavyCycle?.let { action ->
+                        EnhancementCycleButton(
+                            fullscreen = true,
+                            active = heavyActive,
+                            progress = heavyProgress,
+                            onClick = action
+                        )
+                    }
                 }
-                onPhoto?.let { action -> FullscreenCameraButton(action, Icons.Default.CameraAlt, "Сделать фото") }
-                focusController?.let { focus ->
-                    FocusModeButton(
-                        fullscreen = true,
-                        autoEnabled = focus.autoEnabled,
-                        busy = focus.busy,
-                        nominalProgressMs = focus.nominalProgressMs,
-                        onTap = focus.onTap,
-                        onLongPress = focus.onLongPress
+                onPhoto?.let { action -> CameraPhotoButton(fullscreen = true, onClick = action) }
+                    ?: Spacer(Modifier.size(93.dp))
+                Box(Modifier.size(62.dp), contentAlignment = Alignment.Center) {
+                    focusController?.let { focus ->
+                        FocusModeButton(
+                            fullscreen = true,
+                            busy = focus.busy || heavyActive,
+                            nativeAfActive = focus.nativeAfActive,
+                            nominalProgressMs = focus.nominalProgressMs,
+                            onTap = focus.onTap,
+                            onLongPress = focus.onLongPress
+                        )
+                    }
+                }
+            }
+        } else {
+            if (recognizedCount != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(if (controlsMirrored) Alignment.TopEnd else Alignment.TopStart)
+                        .padding(8.dp),
+                    shape = RoundedCornerShape(9.dp),
+                    color = Color.Black.copy(alpha = 0.46f)
+                ) {
+                    Text(
+                        "Распознано: $recognizedCount",
+                        color = Color.White,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
             }
-        } else if (recognizedCount != null) {
-            Surface(
-                modifier = Modifier.align(Alignment.TopStart).padding(8.dp),
-                shape = RoundedCornerShape(9.dp),
-                color = Color.Black.copy(alpha = 0.46f)
+
+            onPhoto?.let { action ->
+                Box(Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp)) {
+                    CameraPhotoButton(fullscreen = false, onClick = action)
+                }
+            }
+
+            val mainAlignment = if (controlsMirrored) Alignment.BottomStart else Alignment.BottomEnd
+            Row(
+                modifier = Modifier.align(mainAlignment).padding(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
+                if (controlsMirrored) {
+                    focusController?.let { focus ->
+                        FocusModeButton(
+                            fullscreen = false,
+                            busy = focus.busy || heavyActive,
+                            nativeAfActive = focus.nativeAfActive,
+                            nominalProgressMs = focus.nominalProgressMs,
+                            onTap = focus.onTap,
+                            onLongPress = focus.onLongPress
+                        )
+                    }
+                    onHeavyCycle?.let { action ->
+                        EnhancementCycleButton(
+                            fullscreen = false,
+                            active = heavyActive,
+                            progress = heavyProgress,
+                            onClick = action
+                        )
+                    }
+                } else {
+                    onHeavyCycle?.let { action ->
+                        EnhancementCycleButton(
+                            fullscreen = false,
+                            active = heavyActive,
+                            progress = heavyProgress,
+                            onClick = action
+                        )
+                    }
+                    focusController?.let { focus ->
+                        FocusModeButton(
+                            fullscreen = false,
+                            busy = focus.busy || heavyActive,
+                            nativeAfActive = focus.nativeAfActive,
+                            nominalProgressMs = focus.nominalProgressMs,
+                            onTap = focus.onTap,
+                            onLongPress = focus.onLongPress
+                        )
+                    }
+                }
+            }
+
+            if (onNextBatch != null || onSwapControls != null || onDebugMarker != null) {
+                val utilityAlignment = if (controlsMirrored) Alignment.BottomEnd else Alignment.BottomStart
+                Column(
+                    modifier = Modifier.align(utilityAlignment).padding(6.dp),
+                    horizontalAlignment = if (controlsMirrored) Alignment.End else Alignment.Start,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    onDebugMarker?.let { DebugMarkerButton(it) }
+                    onTogglePreviewZoom?.let { PreviewZoomButton(previewZoomedIn, it) }
+                    onSwapControls?.let { SwapControlsButton(it) }
+                    onNextBatch?.let { action ->
+                        Surface(
+                            onClick = action,
+                            modifier = Modifier.height(44.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color.Black.copy(alpha = 0.46f),
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = .56f))
+                        ) {
+                            Box(Modifier.padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
+                                Text("След. набор", color = Color.White, fontWeight = FontWeight.SemiBold)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (showDiagnosticsHelp) {
+        AlertDialog(
+            onDismissRequest = { showDiagnosticsHelp = false },
+            title = { Text("Pipeline — обозначения") },
+            text = {
                 Text(
-                    "Распознано: $recognizedCount",
-                    color = Color.White,
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    "jobs — все текущие задачи; число в скобках — возраст самого старого кадра.\n\n" +
+                        "F — быстрый ZXing-проход.\n" +
+                        "ML a/b — ожидающие / выполняемые ML Kit задачи.\n" +
+                        "H a/b — ожидающие / выполняемые дорогие Boost-задачи.\n\n" +
+                        "Панель диагностическая: она ничего не запускает и не управляет фокусом."
+                )
+            },
+            confirmButton = { TextButton(onClick = { showDiagnosticsHelp = false }) { Text("Понятно") } }
+        )
+    }
+}
+
+@Composable
+private fun DebugMarkerButton(onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(66.dp),
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = Color(0xFF7C3AED).copy(alpha = .90f),
+        border = BorderStroke(1.5.dp, Color.White.copy(alpha = .82f))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text("!", color = Color.White, fontSize = 36.sp, fontWeight = FontWeight.Black)
+        }
+    }
+}
+
+@Composable
+private fun PreviewZoomButton(zoomedIn: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(66.dp),
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = if (zoomedIn) Color(0xFF2563EB) else Color.Black.copy(alpha = .50f),
+        border = BorderStroke(1.5.dp, Color.White.copy(alpha = .72f))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                if (zoomedIn) Icons.Default.ZoomOut else Icons.Default.ZoomIn,
+                if (zoomedIn) "Уменьшить: вписать по ширине" else "Увеличить: вписать по высоте",
+                tint = Color.White,
+                modifier = Modifier.size(38.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun FocusDistanceControl(
+    focus: CameraFocusController,
+    fullscreen: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val control = focus.control
+    val minimum = control.minimumFocusDistance ?: return
+    val haptic = LocalHapticFeedback.current
+    var sliderHeightPx by remember { mutableStateOf(1) }
+    fun setFromY(y: Float) {
+        lensDistanceFromSlider((y / sliderHeightPx.coerceAtLeast(1)).coerceIn(0f, 1f), minimum)
+            ?.let(focus.onSliderTarget)
+    }
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Surface(
+            onClick = {
+                haptic.performUiHaptic(UiHapticAction.HOME_TOGGLE)
+                focus.onHomeToggle()
+            },
+            enabled = control.homeToggleEnabled,
+            modifier = Modifier.size(44.dp),
+            shape = androidx.compose.foundation.shape.CircleShape,
+            color = if (control.homeAvailable) Color(0xFF2563EB) else Color.Black.copy(alpha = .48f),
+            border = BorderStroke(1.5.dp, Color.White.copy(alpha = .82f))
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Default.Home,
+                    if (control.homeAvailable) "Изменить или очистить HOME" else "Сохранить HOME",
+                    tint = Color.White.copy(alpha = if (control.homeToggleEnabled) 1f else .38f),
+                    modifier = Modifier.size(24.dp)
                 )
             }
         }
-        if (!fullscreen && onNextBatch != null) {
-            Surface(
-                onClick = onNextBatch,
-                modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).height(44.dp),
-                shape = RoundedCornerShape(10.dp),
-                color = Color.Black.copy(alpha = 0.46f),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = .56f))
-            ) {
-                Box(Modifier.padding(horizontal = 14.dp), contentAlignment = Alignment.Center) {
-                    Text("Следующий набор", color = Color.White, fontWeight = FontWeight.SemiBold)
+        Canvas(
+            Modifier
+                .width(48.dp)
+                .height(if (fullscreen) 280.dp else 184.dp)
+                .onSizeChanged { sliderHeightPx = it.height.coerceAtLeast(1) }
+                .pointerInput(minimum) {
+                    detectTapGestures { offset -> setFromY(offset.y) }
                 }
+                .pointerInput(minimum) {
+                    detectDragGestures(
+                        onDragStart = { setFromY(it.y) },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            setFromY(change.position.y)
+                        }
+                    )
+                }
+        ) {
+            val centerX = size.width / 2f
+            drawLine(
+                color = Color.White.copy(alpha = .72f),
+                start = Offset(centerX, 8.dp.toPx()),
+                end = Offset(centerX, size.height - 8.dp.toPx()),
+                strokeWidth = 3.dp.toPx(),
+                cap = StrokeCap.Round
+            )
+            control.normalizedHome?.let { normalized ->
+                drawCircle(
+                    color = Color(0xFF2563EB).copy(alpha = if (control.nativeAfActive) .5f else 1f),
+                    radius = 10.dp.toPx(),
+                    center = Offset(centerX, normalized * size.height)
+                )
             }
-        }
-        if (!fullscreen && (onTargetedRescue != null || onPhoto != null || focusController != null)) {
-            Row(
-                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                onTargetedRescue?.let { action ->
-                    EnhancementHoldButton(
-                        fullscreen = false,
-                        onPulse = action,
-                        onActiveChange = { enhancementActive = it }
+            control.normalizedRequested?.let { normalized ->
+                drawCircle(
+                    color = Color.White,
+                    radius = 7.dp.toPx(),
+                    center = Offset(centerX, normalized * size.height)
+                )
+            }
+            control.normalizedActual?.let { normalized ->
+                drawCircle(
+                    color = Color.White.copy(alpha = if (control.actualStale) .46f else 1f),
+                    radius = 10.dp.toPx(),
+                    center = Offset(centerX, normalized * size.height),
+                    style = Stroke(
+                        width = 2.5.dp.toPx(),
+                        pathEffect = if (control.actualStale) {
+                            PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx()))
+                        } else null
                     )
-                }
-                onPhoto?.let { action -> CameraOverlayButton(action, Icons.Default.CameraAlt, "Сделать фото") }
-                focusController?.let { focus ->
-                    FocusModeButton(
-                        fullscreen = false,
-                        autoEnabled = focus.autoEnabled,
-                        busy = focus.busy,
-                        nominalProgressMs = focus.nominalProgressMs,
-                        onTap = focus.onTap,
-                        onLongPress = focus.onLongPress
-                    )
-                }
+                )
             }
         }
     }
 }
 
 @Composable
-private fun CameraOverlayButton(
-    onClick: () -> Unit,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String
-) {
+private fun CameraPhotoButton(fullscreen: Boolean, onClick: () -> Unit) {
+    val size = if (fullscreen) 93.dp else 66.dp
+    val iconSize = if (fullscreen) 48.dp else 36.dp
     Surface(
-        modifier = Modifier.size(44.dp),
-        shape = RoundedCornerShape(10.dp),
-        color = Color.Black.copy(alpha = 0.46f),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = .56f))
+        onClick = onClick,
+        modifier = Modifier.size(size),
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = Color.Black.copy(alpha = if (fullscreen) .42f else .50f),
+        border = BorderStroke(2.dp, Color.White.copy(alpha = .82f))
     ) {
-        IconButton(onClick = onClick) {
-            Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(29.dp))
+        Box(contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.CameraAlt, "Сделать фото", tint = Color.White, modifier = Modifier.size(iconSize))
+        }
+    }
+}
+
+@Composable
+private fun SwapControlsButton(onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        modifier = Modifier.size(66.dp),
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = Color.Black.copy(alpha = .50f),
+        border = BorderStroke(1.5.dp, Color.White.copy(alpha = .72f))
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(Icons.Default.SwapHoriz, "Поменять сторону управления", tint = Color.White, modifier = Modifier.size(38.dp))
         }
     }
 }
@@ -734,6 +1406,7 @@ private fun RecordRow(
     onScanned: (Boolean) -> Unit
 ) {
     val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
     val platformConfiguration = LocalViewConfiguration.current
     val halfSecondLongPress = remember(platformConfiguration) {
         object : ViewConfiguration by platformConfiguration {
@@ -808,7 +1481,7 @@ private fun RecordRow(
                         if (selectionMode) {
                             selectionTap()
                         } else {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            performStrongActionHaptic(context)
                             onScanned(true)
                         }
                     },
@@ -916,25 +1589,11 @@ private fun SelectionActionButton(
 }
 
 @Composable
-private fun FullscreenCameraButton(
-    onClick: () -> Unit,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    contentDescription: String
+private fun DetectionOverlay(
+    boxes: List<DetectionBox>,
+    rawPotential: Boolean = false,
+    fitContent: Boolean = false
 ) {
-    Surface(
-        onClick = onClick,
-        modifier = Modifier.size(62.dp),
-        shape = androidx.compose.foundation.shape.CircleShape,
-        color = Color.Black.copy(alpha = 0.42f)
-    ) {
-        Box(contentAlignment = Alignment.Center) {
-            Icon(icon, contentDescription, tint = Color.White, modifier = Modifier.size(34.dp))
-        }
-    }
-}
-
-@Composable
-private fun DetectionOverlay(boxes: List<DetectionBox>) {
     Canvas(Modifier.fillMaxSize()) {
         boxes.forEach { box ->
             val canvasAspect = size.width / size.height.coerceAtLeast(1f)
@@ -942,9 +1601,9 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
             val contentHeight: Float
             val left: Float
             val top: Float
-            // Same FILL_CENTER transform as PreviewView. Usually cropRect already has
-            // the exact canvas aspect, but this also handles a transient resize safely.
-            if (canvasAspect > box.imageAspect) {
+            // Match PreviewView: embedded uses FILL_CENTER, fullscreen uses FIT_CENTER so
+            // switching modes preserves the camera field of view instead of zooming it.
+            if ((canvasAspect > box.imageAspect) != fitContent) {
                 contentWidth = size.width
                 contentHeight = contentWidth / box.imageAspect
                 left = 0f
@@ -955,19 +1614,51 @@ private fun DetectionOverlay(boxes: List<DetectionBox>) {
                 left = (size.width - contentWidth) / 2f
                 top = 0f
             }
-            val path = Path()
-            box.points.forEachIndexed { index, point ->
-                val x = left + point.x * contentWidth
-                val y = top + point.y * contentHeight
-                if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
-            }
-            path.close()
             val (color, strokeWidth) = when (box.highlight) {
-                DetectionHighlight.POTENTIAL -> Color.White to 3.5f
+                DetectionHighlight.POTENTIAL -> Color.White to if (rawPotential) 3.5f else 5.2f
                 DetectionHighlight.ACTIVE -> Color(0xFF22C55E) to 6f
                 DetectionHighlight.DUPLICATE -> Color(0xFFFACC15) to 6f
             }
-            drawPath(path, color, style = Stroke(width = strokeWidth))
+            val overlayAlpha = box.overlayAlpha.coerceIn(0f, 1f)
+
+            if (!rawPotential) {
+                // Production overlay is deliberately screen-axis aligned. Expand the actual
+                // decoder/candidate bounds by 10% overall, then use the same colour for a
+                // ~50%-opaque fill and a slightly rounded outline.
+                val rect = box.axisAlignedPresentationRect() ?: return@forEach
+                val x = left + rect.left * contentWidth
+                val y = top + rect.top * contentHeight
+                val width = (rect.right - rect.left) * contentWidth
+                val height = (rect.bottom - rect.top) * contentHeight
+                val radius = minOf(9.dp.toPx(), width / 5f, height / 5f).coerceAtLeast(1f)
+                val topLeft = Offset(x, y)
+                val drawSize = androidx.compose.ui.geometry.Size(width, height)
+                val corner = androidx.compose.ui.geometry.CornerRadius(radius, radius)
+                drawRoundRect(
+                    color = color.copy(alpha = .50f * overlayAlpha),
+                    topLeft = topLeft,
+                    size = drawSize,
+                    cornerRadius = corner
+                )
+                drawRoundRect(
+                    color = color.copy(alpha = overlayAlpha),
+                    topLeft = topLeft,
+                    size = drawSize,
+                    cornerRadius = corner,
+                    style = Stroke(width = strokeWidth)
+                )
+            } else {
+                val path = Path()
+                box.points.forEachIndexed { index, point ->
+                    val x = left + point.x * contentWidth
+                    val y = top + point.y * contentHeight
+                    if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+                path.close()
+                val fillAlpha = if (box.highlight == DetectionHighlight.POTENTIAL) 0f else .055f
+                if (fillAlpha > 0f) drawPath(path, color.copy(alpha = fillAlpha * overlayAlpha))
+                drawPath(path, color.copy(alpha = overlayAlpha), style = Stroke(width = strokeWidth))
+            }
         }
     }
 }
@@ -1068,6 +1759,271 @@ private fun StoredFrameImage(frame: StoredScanFrame, modifier: Modifier = Modifi
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun DebugLogsScreen(logger: PipelineDebugLogger, view: DebugLogView, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val recordingVersion by logger.linesVersion.collectAsState()
+    val sessionVersion by logger.sessionLinesVersion.collectAsState()
+    val recordingCount by logger.lineCount.collectAsState()
+    val sessionCount by logger.sessionLineCount.collectAsState()
+    val version = if (view == DebugLogView.RECORDING) recordingVersion else sessionVersion
+    val count = if (view == DebugLogView.RECORDING) recordingCount else sessionCount
+    fun snapshotLines(): List<String> = if (view == DebugLogView.RECORDING) logger.snapshotLines() else logger.snapshotSessionLines()
+    fun snapshotText(): String = if (view == DebugLogView.RECORDING) logger.snapshotText() else logger.snapshotSessionText()
+    var lines by remember(view) { mutableStateOf(snapshotLines()) }
+    var autoScroll by remember { mutableStateOf(true) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(version, view) {
+        lines = snapshotLines()
+        if (autoScroll && lines.isNotEmpty()) listState.scrollToItem(lines.lastIndex)
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Логи") },
+                navigationIcon = { IconButton(onClick = { haptic.performUiHaptic(UiHapticAction.NAVIGATION); onBack() }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
+                actions = {
+                    TextButton(onClick = { haptic.performUiHaptic(UiHapticAction.LOG_PLAY_PAUSE); autoScroll = !autoScroll }) {
+                        Text(if (autoScroll) "Авто: вкл" else "Авто: выкл")
+                    }
+                    IconButton(onClick = {
+                        haptic.performUiHaptic(UiHapticAction.LOG_COPY)
+                        clipboard.setText(AnnotatedString(snapshotText()))
+                        Toast.makeText(context, "Лог скопирован", Toast.LENGTH_SHORT).show()
+                    }) { Icon(Icons.Default.ContentCopy, "Скопировать весь лог") }
+                    IconButton(onClick = {
+                        haptic.performUiHaptic(UiHapticAction.LOG_SAVE)
+                        scope.launch {
+                            val ok = saveDebugLog(context, snapshotText(), sessionLog = view == DebugLogView.SESSION)
+                            Toast.makeText(
+                                context,
+                                if (ok) "Лог сохранён в Загрузки" else "Лог пуст или сохранить не удалось",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }) { Icon(Icons.Default.Download, "Скачать .txt") }
+                    IconButton(onClick = {
+                        haptic.performUiHaptic(UiHapticAction.LOG_CLEAR)
+                        if (view == DebugLogView.RECORDING) logger.clear() else logger.clearSessionLogs()
+                    }) { Icon(Icons.Default.DeleteSweep, "Очистить") }
+                }
+            )
+        }
+    ) { padding ->
+        if (lines.isEmpty()) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Text(
+                    if (view == DebugLogView.RECORDING)
+                        "Лог записи пуст. Включите отладку и нажмите Play."
+                    else
+                        "Лог сессии пуст. Здесь хранятся важные события последних 10 минут работы приложения.",
+                    color = Color.Gray
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize().padding(padding).background(Color(0xFF0F172A)),
+                state = listState
+            ) {
+                items(lines) { line ->
+                    Text(
+                        line,
+                        color = Color(0xFFE2E8F0),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 1.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun StatisticsScreen(statistics: ScannerStatisticsStore, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val version by statistics.version.collectAsState()
+    var viewMode by remember { mutableStateOf(StatisticsViewMode.SHORT) }
+    var confirmReset by remember { mutableStateOf(false) }
+    val representation = remember(version, viewMode) { statistics.format(viewMode) }
+    val fullTechnicalReport = remember(version) { statistics.format(StatisticsViewMode.FULL) }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Статистика") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = {
+                        haptic.performUiHaptic(UiHapticAction.STAT_COPY)
+                        clipboard.setText(AnnotatedString(fullTechnicalReport))
+                        Toast.makeText(context, "Полный технический отчёт скопирован", Toast.LENGTH_SHORT).show()
+                    }) { Icon(Icons.Default.ContentCopy, "Скопировать") }
+                    IconButton(onClick = {
+                        haptic.performUiHaptic(UiHapticAction.STAT_SAVE)
+                        scope.launch {
+                            val ok = saveStatistics(context, fullTechnicalReport)
+                            Toast.makeText(
+                                context,
+                                if (ok) "Статистика сохранена в Загрузки" else "Сохранить статистику не удалось",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }) { Icon(Icons.Default.Download, "Скачать полный технический отчёт .txt") }
+                    IconButton(onClick = { confirmReset = true }) {
+                        Icon(Icons.Default.DeleteSweep, "Сбросить")
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StatisticsModeButton(
+                    title = "Кратко",
+                    selected = viewMode == StatisticsViewMode.SHORT,
+                    onClick = { haptic.performUiHaptic(UiHapticAction.STAT_VIEW_MODE); viewMode = StatisticsViewMode.SHORT },
+                    modifier = Modifier.weight(1f)
+                )
+                StatisticsModeButton(
+                    title = "Полная",
+                    selected = viewMode == StatisticsViewMode.FULL,
+                    onClick = { haptic.performUiHaptic(UiHapticAction.STAT_VIEW_MODE); viewMode = StatisticsViewMode.FULL },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            SelectionContainer {
+                LazyColumn(Modifier.fillMaxSize().background(Color(0xFF0F172A))) {
+                    item {
+                        if (viewMode == StatisticsViewMode.SHORT) {
+                            ReadableShortStatistics(representation)
+                        } else {
+                            Text(
+                                representation,
+                                color = Color(0xFFE2E8F0),
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp,
+                                lineHeight = 15.sp,
+                                modifier = Modifier.fillMaxWidth().padding(10.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            title = { Text("Сбросить статистику?") },
+            text = { Text("Будут удалены все накопленные счётчики и распределения.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    statistics.reset()
+                    confirmReset = false
+                }) { Text("Сбросить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmReset = false }) { Text("Отмена") }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ReadableShortStatistics(text: String) {
+    val sections = remember(text) { parseStatisticsSections(text) }
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        sections.forEach { (title, lines) ->
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = Color(0xFF1E293B),
+                border = BorderStroke(1.dp, Color.White.copy(alpha = .10f))
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(5.dp)
+                ) {
+                    Text(title, color = Color(0xFF93C5FD), fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    lines.forEach { line ->
+                        val note = line.startsWith("ℹ")
+                        Text(
+                            line,
+                            color = if (note) Color(0xFF94A3B8) else Color(0xFFE2E8F0),
+                            fontSize = if (note) 12.sp else 14.sp,
+                            lineHeight = if (note) 16.sp else 19.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun parseStatisticsSections(text: String): List<Pair<String, List<String>>> {
+    val result = mutableListOf<Pair<String, List<String>>>()
+    var title = "Отчёт"
+    var lines = mutableListOf<String>()
+    fun flush() {
+        val content = lines.filter(String::isNotBlank)
+        if (content.isNotEmpty()) result += title to content
+        lines = mutableListOf()
+    }
+    text.lineSequence().forEach { raw ->
+        if (raw.startsWith("## ")) {
+            flush()
+            title = raw.removePrefix("## ").trim()
+        } else {
+            lines += raw
+        }
+    }
+    flush()
+    return result.ifEmpty { listOf("Отчёт" to listOf("Данных пока нет.")) }
+}
+
+@Composable
+private fun StatisticsModeButton(
+    title: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        onClick = onClick,
+        modifier = modifier.height(42.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = if (selected) Color(0xFFDDEAFE) else Color(0xFFE2E8F0),
+        border = if (selected) BorderStroke(1.dp, Color(0xFF60A5FA)) else null
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(title, color = if (selected) Color(0xFF1D4ED8) else Color(0xFF475569))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun RecoveryScreen(vm: AppViewModel, onBack: () -> Unit) {
     val candidates by vm.recoveryCandidates.collectAsState()
     val busy by vm.recoveryBusy.collectAsState()
@@ -1157,6 +2113,7 @@ private fun RecoveryCandidateRow(
 @Composable
 private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> Unit) {
     val haptic = LocalHapticFeedback.current
+    val context = LocalContext.current
     var viewerIds by remember(initial.ids) { mutableStateOf(initial.ids) }
     val initialPage = initial.index.coerceIn(0, initial.ids.lastIndex.coerceAtLeast(0))
     val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { viewerIds.size })
@@ -1194,8 +2151,24 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Назад") } },
                 actions = {
                     if (!showPhoto) IconButton(onClick = vm::cycleMatrixSize) { MatrixSizeIcon(matrixSize) }
+                    if (showPhoto) {
+                        scanFrame?.let { frame ->
+                            TextButton(onClick = {
+                                scope.launch {
+                                    val saved = saveJpegToGallery(context, frame.jpeg, "DataMatrix_source")
+                                    Toast.makeText(context, if (saved) "Исходное фото сохранено" else "Не удалось сохранить фото", Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Icon(Icons.Default.Download, null)
+                                Text("Скачать")
+                            }
+                        }
+                    }
                     if (scanFrame != null) {
-                        IconButton(onClick = { showPhoto = !showPhoto }) {
+                        IconButton(onClick = {
+                            showPhoto = !showPhoto
+                            vm.logUiEvent("viewer_toggle_photo", "photo" to if (showPhoto) 1 else 0)
+                        }) {
                             Icon(if (showPhoto) Icons.Default.QrCode2 else Icons.Default.PhotoCamera, if (showPhoto) "Показать Data Matrix" else "Показать кадр")
                         }
                     }
@@ -1206,9 +2179,7 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
             Button(
                 onClick = {
                     current?.let { record ->
-                        if (initial.source != RecordStatus.ARCHIVED) {
-                            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                        }
+                        performStrongActionHaptic(context)
                         if (!record.isScanned) {
                             vm.setScanned(record.id, true) { }
                         }
@@ -1226,7 +2197,7 @@ private fun ViewerScreen(vm: AppViewModel, initial: ViewerState, onBack: () -> U
                         }
                     }
                 },
-                modifier = Modifier.navigationBarsPadding().fillMaxWidth().padding(16.dp).height(72.dp),
+                modifier = Modifier.navigationBarsPadding().fillMaxWidth().padding(16.dp).height(180.dp),
                 shape = RoundedCornerShape(14.dp)
             ) { Text("ОТСКАНИРОВАНО", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
         }

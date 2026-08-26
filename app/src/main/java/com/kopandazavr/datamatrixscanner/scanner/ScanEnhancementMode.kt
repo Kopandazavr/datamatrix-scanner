@@ -33,3 +33,6 @@ internal fun looksLikeGs1(rawBytes: ByteArray): Boolean {
     if ((start + 2 until start + 16).any { values[it] !in '0'.code..'9'.code }) return false
     return values[start + 16] == '2'.code && values[start + 17] == '1'.code
 }
+
+internal fun decodedBarcodeBytes(rawBytes: ByteArray?, rawValue: String?): ByteArray? =
+    rawBytes ?: rawValue?.toByteArray(Charsets.UTF_8)

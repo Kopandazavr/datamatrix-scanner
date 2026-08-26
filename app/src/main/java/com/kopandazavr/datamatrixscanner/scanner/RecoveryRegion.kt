@@ -53,6 +53,39 @@ internal data class RecoveryRegion(
     }
 }
 
+internal data class CenteredCropGeometry(
+    val originX: Int,
+    val originY: Int,
+    val side: Int,
+    val sourceLeft: Int,
+    val sourceTop: Int,
+    val sourceRight: Int,
+    val sourceBottom: Int
+) {
+    val edgePadded: Boolean get() = originX < 0 || originY < 0 || sourceRight - originX < side || sourceBottom - originY < side
+}
+
+/**
+ * Geometry for a virtual square whose centre remains on the candidate instead of being shifted
+ * inward at a frame edge. This is required by ML Kit's Data Matrix centre-of-input constraint.
+ */
+internal fun RecoveryRegion.centeredCropGeometry(
+    imageWidth: Int,
+    imageHeight: Int,
+    padding: Float
+): CenteredCropGeometry? {
+    if (imageWidth <= 0 || imageHeight <= 0 || width <= 0f || height <= 0f) return null
+    val side = kotlin.math.ceil(max(width, height) * (1f + padding * 2f)).toInt().coerceAtLeast(16)
+    val originX = kotlin.math.floor(centerX - side / 2f).toInt()
+    val originY = kotlin.math.floor(centerY - side / 2f).toInt()
+    val sourceLeft = originX.coerceAtLeast(0)
+    val sourceTop = originY.coerceAtLeast(0)
+    val sourceRight = (originX + side).coerceAtMost(imageWidth)
+    val sourceBottom = (originY + side).coerceAtMost(imageHeight)
+    if (sourceRight <= sourceLeft || sourceBottom <= sourceTop) return null
+    return CenteredCropGeometry(originX, originY, side, sourceLeft, sourceTop, sourceRight, sourceBottom)
+}
+
 internal fun mergeRecoveryRegions(
     input: List<RecoveryRegion>,
     imageWidth: Int,
