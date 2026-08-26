@@ -76,7 +76,7 @@ export GRADLE_USER_HOME="$GRADLE_HOME_VALUE"
 
 tasks=("$@")
 if [[ ${#tasks[@]} -eq 0 ]]; then
-  tasks=(testDebugUnitTest assembleDebug assembleRelease)
+  tasks=(clean testDebugUnitTest assembleDebug assembleRelease)
 fi
 
 gradle_args=(--no-daemon --stacktrace)
